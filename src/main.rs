@@ -949,7 +949,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             // find the focused app
-            let Some((app_index, app)) = state.apps.iter().enumerate().find(|(_, a)| a.state.contains(&State::Activated)) else {
+            let Some((_, app)) = state.apps.iter().enumerate().find(|(_, a)| a.state.contains(&State::Activated)) else {
                 return Err(CliError::new("no focused app found.".into()));
             };
 
@@ -963,9 +963,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or("?");
 
             let title = app.title.as_deref().unwrap_or("?");
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
 
-            // push to minimize stack: workspace:index:app_id:title
-            let entry = format!("{}:{}:{}:{}", current_ws, app_index, app.app_id.as_deref().unwrap_or("?"), title);
+            // push to minimize stack: workspace:timestamp:app_id:title
+            let entry = format!("{}:{}:{}:{}", current_ws, timestamp, app.app_id.as_deref().unwrap_or("?"), title);
             let mut stack = fs::read_to_string(minimize_stack).unwrap_or_default();
             stack.push_str(&entry);
             stack.push('\n');
@@ -976,8 +980,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             conn.flush()?;
         }
         Command::Unminimize => {
-            let minimize_stack = Path::new("/tmp/cos-cli-minimized");
-
             let Some(manager) = &state.cosmic_toplevel_manager else {
                 return Err(CliError::new(
                     "Compositor does not support toplevel management protocol.".into(),
@@ -993,47 +995,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|ws| ws.name.clone())
                 .unwrap_or_default();
 
-            // read the minimize stack
-            let stack_content = fs::read_to_string(minimize_stack).unwrap_or_default();
-            let mut lines: Vec<&str> = stack_content.lines().collect();
+            // try daemon first for the most recently minimized window on this workspace
+            let (app_id, title) = if let Ok(response) = daemon::send_command(&format!("last-minimized {}", current_ws)) {
+                if response != "none" {
+                    let parts: Vec<&str> = response.splitn(2, '|').collect();
+                    if parts.len() == 2 {
+                        (parts[0].to_string(), parts[1].to_string())
+                    } else {
+                        return Err(CliError::new(format!("no minimized apps on workspace {}.", current_ws)));
+                    }
+                } else {
+                    return Err(CliError::new(format!("no minimized apps on workspace {}.", current_ws)));
+                }
+            } else {
+                // daemon not running, fall back to statefile
+                let minimize_stack = Path::new("/tmp/cos-cli-minimized");
+                let stack_content = fs::read_to_string(minimize_stack).unwrap_or_default();
+                let mut lines: Vec<&str> = stack_content.lines().collect();
 
-            // find the last entry for the current workspace (search from the end)
-            let Some(pos) = lines.iter().rposition(|line| line.starts_with(&format!("{}:", current_ws))) else {
-                return Err(CliError::new(format!("no minimized apps on workspace {}.", current_ws)));
+                let Some(pos) = lines.iter().rposition(|line| line.starts_with(&format!("{}:", current_ws))) else {
+                    return Err(CliError::new(format!("no minimized apps on workspace {}.", current_ws)));
+                };
+
+                let entry = lines[pos];
+                let parts: Vec<&str> = entry.splitn(4, ':').collect();
+
+                if parts.len() < 3 {
+                    return Err(CliError::new("corrupt minimize stack entry.".into()));
+                }
+
+                let aid = parts[2].to_string();
+                let t = if parts.len() >= 4 { parts[3].to_string() } else { String::new() };
+
+                // remove the entry
+                lines.remove(pos);
+                let _ = fs::write(minimize_stack, lines.join("\n") + if lines.is_empty() { "" } else { "\n" });
+
+                (aid, t)
             };
 
-            let entry = lines[pos];
-            let parts: Vec<&str> = entry.splitn(4, ':').collect();
-
-            if parts.len() < 3 {
-                return Err(CliError::new("corrupt minimize stack entry.".into()));
-            }
-
-            let app_id = parts[2];
-            let title = if parts.len() >= 4 { parts[3] } else { "" };
-
-            // find a minimized app matching app_id + title, fall back to app_id only
+            // find the minimized app matching app_id + title, fall back to app_id only
             let app = state.apps.iter().find(|a| {
-                a.app_id.as_deref() == Some(app_id)
+                a.app_id.as_deref() == Some(&app_id)
                     && a.state.contains(&State::Minimized)
                     && !title.is_empty()
-                    && a.title.as_deref() == Some(title)
+                    && a.title.as_deref() == Some(&title)
             }).or_else(|| {
                 state.apps.iter().find(|a| {
-                    a.app_id.as_deref() == Some(app_id) && a.state.contains(&State::Minimized)
+                    a.app_id.as_deref() == Some(&app_id) && a.state.contains(&State::Minimized)
                 })
             });
 
             let Some(app) = app else {
-                // app no longer minimized or gone, remove the stale entry
-                lines.remove(pos);
-                let _ = fs::write(minimize_stack, lines.join("\n") + if lines.is_empty() { "" } else { "\n" });
                 return Err(CliError::new(format!("app '{}' is no longer minimized.", app_id)));
             };
-
-            // remove the entry from the stack
-            lines.remove(pos);
-            let _ = fs::write(minimize_stack, lines.join("\n") + if lines.is_empty() { "" } else { "\n" });
 
             // unminimize the app
             manager.unset_minimized(&app.handle);
