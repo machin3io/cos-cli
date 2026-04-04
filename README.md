@@ -4,11 +4,15 @@ A CLI tool for managing windows and workspaces on the COSMIC Desktop Environment
 
 > **Note:** This is a third-party, unofficial tool. It is not affiliated with System76 or the official COSMIC project.
 
+> **Fork note:** This is a `machin3` fork (`workspace_control` branch) adding the `workspace` subcommand for direct workspace switching and toggle. The upstream repo is [estin/cos-cli](https://github.com/estin/cos-cli).
+
 ## Features
-- **List Information**: View active applications, workspaces, and outputs.
+- **List Information**: View active applications, workspaces (with active state), and outputs.
 - **Window Management**: Move applications between workspaces by their App ID.
 - **Activate Application**: Bring a specific application to the foreground.
-- **Smart Wait**: Option to wait for an application to launch before moving it.
+- **Window State**: Set window state (maximize, minimize, fullscreen, sticky).
+- **Workspace Switching**: Switch directly to any workspace by name.
+- **Workspace Toggle**: Switch back and forth between the last two workspaces.
 
 ## Installation
 Ensure you have the Rust toolchain installed.
@@ -23,6 +27,12 @@ or from github directly
 cargo install --git https://github.com/estin/cos-cli
 ````
 
+For the machin3 fork:
+
+````console
+./build.sh    # builds and installs to ~/.cargo/bin/cos-cli
+````
+
 ## Usage
 ````console
 cos-cli [COMMAND]
@@ -31,7 +41,7 @@ cos-cli [COMMAND]
 ### Commands
 
 #### `info`
-List all available apps, workspaces, outputs and seats, including the state of each app window.
+List all available apps, workspaces, outputs and seats, including the state of each app window. Workspaces show their active state.
 ````console
 cos-cli info
 ````
@@ -43,7 +53,7 @@ Apps:
 Workspaces:
 	[0] Group
 		Workspace: 1
-		Workspace: 2
+		Workspace: 2 (active)
 		Workspace: 3
 Outputs:
 	[0] Output: eDP-1
@@ -57,12 +67,48 @@ cos-cli info --json
 ````
 Example output:
 ````json
-{"apps":[{"index":0,"app_id":"firefox","title":"Gemini - Mozilla Firefox","state":["activated"]},{"index":1,"app_id":"org.wezfurlong.wezterm","title":"cos-cli","state":["maximized"]}],"workspaces":[{"index":0,"workspaces":[{"name":"1"},{"name":"2"},{"name":"3"}]}],"outputs":[{"index":0,"name":"eDP-1"}],"seats":[{"index":0,"name":"seat0"}]}
+{"apps":[{"index":0,"app_id":"firefox","title":"Gemini - Mozilla Firefox","state":["activated"]},{"index":1,"app_id":"org.wezfurlong.wezterm","title":"cos-cli","state":["maximized"]}],"workspaces":[{"index":0,"workspaces":[{"name":"1","active":false},{"name":"2","active":true},{"name":"3","active":false}]}],"outputs":[{"index":0,"name":"eDP-1"}],"seats":[{"index":0,"name":"seat0"}]}
 ````
 
 Using `jq` to find app index by pattern and activate app
 ````console
 cos-cli activate -i $(cos-cli info --json | jq '.apps[] | select(.app_id | test("wezterm")) | .index')
+````
+
+#### `workspace`
+Switch to a workspace by name, or toggle between the last two workspaces.
+````console
+cos-cli workspace -w 2
+cos-cli workspace -w 10
+cos-cli workspace -w 3 -g 0
+cos-cli workspace --toggle
+````
+Arguments:
+*   `-w, --workspace <NAME>`
+    The name of the target workspace
+*   `-g, --workspace-group <INDEX>`
+    The workspace group index from 'info' command (optional, only needed for multi-monitor setups)
+*   `--toggle`
+    Switch to the previous workspace
+
+##### Why this exists
+
+COSMIC uses a dynamic workspace model where pinned (sticky) workspaces always have one additional dynamic workspace appended after the last pinned one. If you pin 10 workspaces, COSMIC creates an 11th.
+
+COSMIC's built-in keyboard shortcuts only support Super+1 through Super+9 for direct workspace switching. There is no native binding for the 10th workspace. The "switch to last workspace" shortcut switches to the very last workspace, which in this case is the 11th (the dynamic one), not the 10th.
+
+`cos-cli workspace -w 10` solves this by switching directly to the workspace named "10", regardless of how many workspaces exist.
+
+##### Workspace toggle
+
+`cos-cli workspace --toggle` switches between the last two workspaces. Every time `cos-cli workspace` switches to a new workspace, it saves the current workspace name to `/tmp/cos-cli-last-workspace`. The `--toggle` flag reads this file and switches back to the saved workspace.
+
+**Important:** The toggle only tracks switches made through cos-cli. If you switch workspaces using the COSMIC top bar or other means, the statefile won't be updated and toggle won't know about it. For reliable toggle behavior, route all workspace switching through cos-cli keybinds:
+
+````
+Super+1 through Super+9  →  cos-cli workspace -w 1  through  -w 9
+Super+0                   →  cos-cli workspace -w 10
+Super+Escape              →  cos-cli workspace --toggle
 ````
 
 #### `move`
