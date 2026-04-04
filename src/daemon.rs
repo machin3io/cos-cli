@@ -311,8 +311,8 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
                     minimize_changed = true;
                 }
 
-                // if the app just became activated, it's on the active workspace
-                if states.contains(&"activated".to_string()) && !old_state.contains(&"activated".to_string()) {
+                // if the app became activated and is on a different workspace, update it
+                if states.contains(&"activated".to_string()) && w.workspace != active_ws {
                     println!("  activated: {} '{}' moved {} -> {}", app_id, title, w.workspace, active_ws);
                     w.workspace = active_ws.clone();
                 }
