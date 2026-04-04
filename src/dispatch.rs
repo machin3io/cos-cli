@@ -51,11 +51,13 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
                     );
                 }
                 "ext_workspace_manager_v1" => {
-                    proxy.bind::<ext_workspace_manager_v1::ExtWorkspaceManagerV1, _, _>(
-                        name,
-                        version,
-                        qh,
-                        (),
+                    state.workspace_manager = Some(
+                        proxy.bind::<ext_workspace_manager_v1::ExtWorkspaceManagerV1, _, _>(
+                            name,
+                            version,
+                            qh,
+                            (),
+                        ),
                     );
                 }
                 "zcosmic_toplevel_manager_v1" => {

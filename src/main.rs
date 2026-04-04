@@ -7,7 +7,7 @@ use wayland_client::{
     Connection, EventQueue,
     protocol::{wl_output, wl_seat},
 };
-use wayland_protocols::ext::workspace::v1::client::ext_workspace_handle_v1;
+use wayland_protocols::ext::workspace::v1::client::{ext_workspace_handle_v1, ext_workspace_manager_v1};
 
 mod dispatch;
 
@@ -21,6 +21,7 @@ Commands:
   move                          Move an application to a specific workspace
   activate                      Activate an application on a specific seat
   state                         Set state of an application
+  workspace                     Switch to a workspace
 
 Options for 'move':
   -a, --app-id <ID>             The Application ID (partial match, case-insensitive)
@@ -47,6 +48,10 @@ Options for 'state':
   --sticky
   --unsticky
 
+Options for 'workspace':
+  -w, --workspace <NAME>        The name of the target workspace
+  -g, --workspace-group <INDEX> The workspace group index from 'info' command (optional)
+
 Options for 'info':
   --json                        Output in JSON format
 
@@ -60,6 +65,8 @@ Examples:
   cos-cli move -a terminal -w 2 -g 1
   cos-cli activate -i 0 -s 0
   cos-cli activate -i 0
+  cos-cli workspace -w 2
+  cos-cli workspace -w 3 -g 0
   cos-cli state -i 0 --maximize
   cos-cli state --app-id firefox --sticky --fullscreen
 ";
@@ -104,6 +111,7 @@ impl From<&str> for CliError {
 
 struct AppState {
     workspace_group: Vec<Vec<(String, ext_workspace_handle_v1::ExtWorkspaceHandleV1)>>,
+    workspace_manager: Option<ext_workspace_manager_v1::ExtWorkspaceManagerV1>,
     cosmic_toplevel_manager: Option<zcosmic_toplevel_manager_v1::ZcosmicToplevelManagerV1>,
     outputs: Vec<(wl_output::WlOutput, String)>,
     seats: Vec<(wl_seat::WlSeat, String)>,
@@ -219,6 +227,12 @@ impl AppFinderArgs for StateArgs {
 }
 
 #[derive(Debug)]
+struct WorkspaceArgs {
+    workspace_name: String,
+    workspace_group_index: Option<usize>,
+}
+
+#[derive(Debug)]
 struct InfoArgs {
     json: bool,
 }
@@ -228,6 +242,7 @@ enum Command {
     Move(MoveArgs),
     Activate(ActivateArgs),
     State(StateArgs),
+    Workspace(WorkspaceArgs),
 }
 
 fn find_apps<T: AppFinderArgs>(
@@ -374,6 +389,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             Command::State(args)
         }
+        Some("workspace") => {
+            Command::Workspace(WorkspaceArgs {
+                workspace_name: pargs.value_from_str(["-w", "--workspace"])?,
+                workspace_group_index: pargs.opt_value_from_str(["-g", "--workspace-group"])?,
+            })
+        }
         Some("help") | None => {
             println!("{HELP}");
             return Ok(());
@@ -392,6 +413,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut state = AppState {
         cosmic_toplevel_manager: None,
+        workspace_manager: None,
         workspace_group: Vec::new(),
         apps: Vec::new(),
         outputs: Vec::new(),
@@ -626,6 +648,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            conn.flush()?;
+        }
+        Command::Workspace(args) => {
+            let Some((_, workspace)) = (if let Some(group_index) = args.workspace_group_index {
+                if let Some(group) = state.workspace_group.get(group_index) {
+                    group.iter().find(|(w, _)| w == &args.workspace_name)
+                } else {
+                    return Err(CliError::new(format!(
+                        "Workspace group not found: {}",
+                        group_index
+                    )));
+                }
+            } else {
+                state
+                    .workspace_group
+                    .iter()
+                    .flat_map(|v| v.iter())
+                    .find(|(w, _)| w == &args.workspace_name)
+            }) else {
+                return Err(CliError::new(format!(
+                    "Workspace not found: {}",
+                    args.workspace_name
+                )));
+            };
+
+            let Some(manager) = &state.workspace_manager else {
+                return Err(CliError::new(
+                    "Compositor does not support workspace management protocol.".into(),
+                ));
+            };
+
+            workspace.activate();
+            manager.commit();
             conn.flush()?;
         }
     };
