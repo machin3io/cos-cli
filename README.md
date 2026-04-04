@@ -111,7 +111,7 @@ COSMIC's built-in keyboard shortcuts only support Super+1 through Super+9 for di
 **Important:** The toggle only tracks switches made through cos-cli. If you switch workspaces using the COSMIC top bar or other means, the statefile won't be updated and toggle won't know about it. For reliable toggle behavior, route all workspace switching through cos-cli keybinds:
 
 ````
-Super+1 through Super+9  →  cos-cli workspace -w 1  through  -w 9
+Super+1 through Super+9   →  cos-cli workspace -w 1  through  -w 9
 Super+0                   →  cos-cli workspace -w 10
 Super+Escape              →  cos-cli workspace --toggle
 Super+Right               →  cos-cli workspace --next --no-dynamic
