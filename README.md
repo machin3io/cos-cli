@@ -12,9 +12,11 @@ A CLI tool for managing windows and workspaces on the COSMIC Desktop Environment
 - **Activate Application**: Bring a specific application to the foreground.
 - **Window State**: Set window state (maximize, minimize, fullscreen, sticky).
 - **Workspace Switching**: Switch directly to any workspace by name, or cycle with next/prev (with wrapping and optional dynamic workspace exclusion).
+- **Skip-Empty Cycling**: Cycle through only workspaces with visible windows (requires daemon).
 - **Workspace Toggle**: Switch back and forth between the last two workspaces via statefile history.
 - **Minimize/Unminimize**: Minimize the focused app with per-workspace history, unminimize the last minimized app on the current workspace.
 - **Per-Workspace Gaps**: Automatically apply window gap settings per workspace, with keybinds to adjust on the fly.
+- **Daemon Mode**: Persistent background process that tracks windows across workspaces via Wayland events, enabling skip-empty cycling and per-workspace queries.
 
 ## Installation
 Ensure you have the Rust toolchain installed.
@@ -117,6 +119,8 @@ Super+0                   →  cos-cli workspace -w 10
 Super+Escape              →  cos-cli workspace --toggle
 Super+Right               →  cos-cli workspace --next --no-dynamic
 Super+Left                →  cos-cli workspace --prev --no-dynamic
+Super+Alt+Right           →  cos-cli workspace --next --skip-empty --no-dynamic
+Super+Alt+Left            →  cos-cli workspace --prev --skip-empty --no-dynamic
 ````
 
 #### `minimize`
@@ -240,4 +244,26 @@ Examples:
 cos-cli state -i 0 --maximize
 cos-cli state --app-id firefox --sticky --fullscreen --wait 5
 cos-cli state -i 1 --unminimize
+````
+
+#### `daemon`
+Start the background daemon for persistent window/workspace tracking.
+````console
+cos-cli daemon
+cos-cli daemon --restart
+````
+
+The daemon maintains a persistent Wayland connection and tracks all windows — which workspace they're on, their state (minimized, activated, etc.), and title changes. It listens on `$XDG_RUNTIME_DIR/cos-cli.sock` for IPC queries from other cos-cli commands.
+
+Windows are assigned to the workspace that was active when they appeared or became focused. The `move-to` command notifies the daemon when a window is moved. This enables features like `--skip-empty` that need per-workspace window counts.
+
+#### `query`
+Query the daemon's tracked state.
+````console
+cos-cli query                    # full state (windows + active workspace)
+cos-cli query ping               # check if daemon is alive
+cos-cli query active-workspace   # current workspace name
+cos-cli query visible-on 3       # count of visible (non-minimized) windows on workspace 3
+cos-cli query windows-on 5       # list all windows on workspace 5
+cos-cli query shutdown           # stop the daemon
 ````
