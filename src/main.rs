@@ -66,6 +66,7 @@ Options for 'workspace':
   --max <N>                     Highest workspace number for --next/--prev (overrides --no-dynamic)
   --no-dynamic                  Auto-detect max by ignoring the trailing dynamic workspace
                                 COSMIC adds after pinned ones (use with --next/--prev)
+  --skip-empty                  Skip workspaces with no visible windows (requires daemon)
 
 Options for 'move-to':
   -w, --workspace <NAME>        The name of the target workspace
@@ -94,6 +95,8 @@ Examples:
   cos-cli workspace --prev
   cos-cli workspace --next --no-dynamic
   cos-cli workspace --prev --no-dynamic
+  cos-cli workspace --next --skip-empty --no-dynamic
+  cos-cli workspace --prev --skip-empty --no-dynamic
   cos-cli workspace --next --max 12
   cos-cli move-to -w 5
   cos-cli move-to -w 10
@@ -281,6 +284,7 @@ struct WorkspaceArgs {
     prev: bool,
     max: Option<usize>,
     no_dynamic: bool,
+    skip_empty: bool,
 }
 
 #[derive(Debug)]
@@ -450,6 +454,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let next = pargs.contains("--next");
             let prev = pargs.contains("--prev");
             let no_dynamic = pargs.contains("--no-dynamic");
+            let skip_empty = pargs.contains("--skip-empty");
             let max: Option<usize> = pargs.opt_value_from_str("--max")?;
             let workspace_name: Option<String> = pargs.opt_value_from_str(["-w", "--workspace"])?;
 
@@ -467,6 +472,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev,
                 max,
                 no_dynamic,
+                skip_empty,
             })
         }
         Some("move-to") => {
@@ -806,12 +812,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     return Err(CliError::new("no previous workspace recorded.".into()));
                 }
-            } else if args.next {
-                let next = if current_num >= ws_max { 1 } else { current_num + 1 };
-                next.to_string()
-            } else if args.prev {
-                let prev = if current_num <= 1 { ws_max } else { current_num - 1 };
-                prev.to_string()
+            } else if args.next || args.prev {
+                let mut candidate = current_num;
+
+                loop {
+                    candidate = if args.next {
+                        if candidate >= ws_max { 1 } else { candidate + 1 }
+                    } else {
+                        if candidate <= 1 { ws_max } else { candidate - 1 }
+                    };
+
+                    // wrapped all the way around, no non-empty workspace found
+                    if candidate == current_num {
+                        break;
+                    }
+
+                    if !args.skip_empty {
+                        break;
+                    }
+
+                    // query daemon for visible window count
+                    if let Ok(response) = daemon::send_command(&format!("visible-on {}", candidate)) {
+                        if let Ok(count) = response.parse::<usize>() {
+                            if count > 0 {
+                                break;
+                            }
+                        }
+                    } else {
+                        // daemon not running, fall back to no skipping
+                        break;
+                    }
+                }
+
+                candidate.to_string()
             } else {
                 args.workspace_name.unwrap()
             };
