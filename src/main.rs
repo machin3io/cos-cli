@@ -11,6 +11,7 @@ use wayland_client::{
 };
 use wayland_protocols::ext::workspace::v1::client::{ext_workspace_handle_v1, ext_workspace_manager_v1};
 
+mod daemon;
 mod dispatch;
 
 const HELP: &str = "\
@@ -25,6 +26,7 @@ Commands:
   state                         Set state of an application
   workspace                     Switch to a workspace
   move-to                       Move the focused app to a specific workspace
+  daemon                        Start the background daemon for persistent window tracking
   gap                           Adjust window gaps on the current workspace
   minimize                      Minimize the focused app (with history tracking)
   unminimize                    Restore the last minimized app on the current workspace
@@ -288,6 +290,7 @@ enum Command {
     Gap(i32),
     Minimize,
     Unminimize,
+    Daemon,
 }
 
 fn find_apps<T: AppFinderArgs>(
@@ -473,6 +476,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("minimize") => Command::Minimize,
         Some("unminimize") => Command::Unminimize,
+        Some("daemon") => Command::Daemon,
         Some("help") | None => {
             println!("{HELP}");
             return Ok(());
@@ -484,6 +488,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )));
         }
     };
+
+    // daemon runs its own wayland connection and event loop
+    if matches!(command, Command::Daemon) {
+        return daemon::run_daemon();
+    }
 
     let conn = Connection::connect_to_env()?;
     let mut event_queue = conn.new_event_queue();
@@ -960,6 +969,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             manager.unset_minimized(&app.handle);
             conn.flush()?;
         }
+        Command::Daemon => unreachable!(),
     };
 
     Ok(())
