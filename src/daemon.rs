@@ -24,6 +24,7 @@ pub struct WindowInfo {
     pub title: String,
     pub workspace: String,
     pub state: Vec<String>,
+    pub minimized_at: Option<u64>,
 }
 
 impl DaemonState {
@@ -44,6 +45,7 @@ impl DaemonState {
             title: title.to_string(),
             workspace: workspace.to_string(),
             state: Vec::new(),
+            minimized_at: None,
         });
 
         id
@@ -62,6 +64,36 @@ impl DaemonState {
             w.workspace == workspace && !w.state.contains(&"minimized".to_string())
         }).collect()
     }
+
+    pub fn last_minimized_on_workspace(&self, workspace: &str) -> Option<(&u32, &WindowInfo)> {
+        self.windows.iter()
+            .filter(|(_, w)| w.workspace == workspace && w.state.contains(&"minimized".to_string()) && w.minimized_at.is_some())
+            .max_by_key(|(_, w)| w.minimized_at.unwrap())
+    }
+
+    pub fn write_minimize_statefile(&self) {
+        let path = Path::new("/tmp/cos-cli-minimized");
+        let mut content = String::new();
+
+        // collect all minimized windows, sorted by timestamp
+        let mut minimized: Vec<&WindowInfo> = self.windows.values()
+            .filter(|w| w.state.contains(&"minimized".to_string()) && w.minimized_at.is_some())
+            .collect();
+
+        minimized.sort_by_key(|w| w.minimized_at.unwrap());
+
+        for w in minimized {
+            content.push_str(&format!("{}:{}:{}:{}\n", w.workspace, w.minimized_at.unwrap(), w.app_id, w.title));
+        }
+
+        let _ = fs::write(path, content);
+    }
+}
+
+
+fn now_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
 
@@ -226,6 +258,8 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        let mut minimize_changed = false;
+
         // build current app keys
         let current_keys: Vec<(String, String)> = wl_state.apps.iter().map(|a| {
             (a.app_id.as_deref().unwrap_or("unknown").to_string(), a.title.as_deref().unwrap_or("").to_string())
@@ -263,7 +297,19 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
 
             if let Some(w) = ds.windows.values_mut().find(|w| w.app_id == app_id && w.title == title) {
                 let old_state = w.state.clone();
+                let was_minimized = old_state.contains(&"minimized".to_string());
+                let is_minimized = states.contains(&"minimized".to_string());
+
                 w.state = states.clone();
+
+                // track minimize timestamp
+                if is_minimized && !was_minimized {
+                    w.minimized_at = Some(now_millis());
+                    minimize_changed = true;
+                } else if !is_minimized && was_minimized {
+                    w.minimized_at = None;
+                    minimize_changed = true;
+                }
 
                 // if the app just became activated, it's on the active workspace
                 if states.contains(&"activated".to_string()) && !old_state.contains(&"activated".to_string()) {
@@ -286,6 +332,11 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
                     w.title = title.to_string();
                 }
             }
+        }
+
+        // sync minimize statefile when state changes
+        if minimize_changed {
+            ds.write_minimize_statefile();
         }
 
         known_keys = current_keys;
@@ -315,14 +366,13 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             let ws = &cmd[11..];
             let windows = ds.windows_on_workspace(ws);
 
-            let entries: Vec<String> = windows.iter().map(|w| {
-                format!("{}|{}|{}", w.app_id, w.title, w.state.join(","))
-            }).collect();
-
-            if entries.is_empty() {
+            if windows.is_empty() {
                 "none".to_string()
             } else {
-                entries.join(";")
+                windows.iter().map(|w| {
+                    let state = if w.state.is_empty() { String::new() } else { format!(" [{}]", w.state.join(",")) };
+                    format!("{}:{}{}", w.app_id, w.title, state)
+                }).collect::<Vec<_>>().join("\n")
             }
         }
 
@@ -372,6 +422,16 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             out
+        }
+
+        cmd if cmd.starts_with("last-minimized ") => {
+            let ws = &cmd[15..];
+
+            if let Some((_, w)) = ds.last_minimized_on_workspace(ws) {
+                format!("{}|{}", w.app_id, w.title)
+            } else {
+                "none".to_string()
+            }
         }
 
         "shutdown" => {
