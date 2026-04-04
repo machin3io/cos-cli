@@ -18,7 +18,7 @@ use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
 };
 
-use crate::{App, AppState, State};
+use crate::{App, AppState, State, Workspace};
 
 impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
     fn event(
@@ -165,10 +165,29 @@ impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for AppState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        if let ext_workspace_handle_v1::Event::Name { name } = event
-            && let Some(current_group) = state.workspace_group.last_mut()
-        {
-            current_group.push((name, proxy.clone()));
+        match event {
+            ext_workspace_handle_v1::Event::Name { name } => {
+                if let Some(current_group) = state.workspace_group.last_mut() {
+                    current_group.push(Workspace {
+                        name,
+                        handle: proxy.clone(),
+                        active: false,
+                    });
+                }
+            }
+            ext_workspace_handle_v1::Event::State { state: ws_state } => {
+                let is_active = matches!(
+                    ws_state,
+                    wayland_client::WEnum::Value(ext_workspace_handle_v1::State::Active)
+                );
+
+                for group in state.workspace_group.iter_mut() {
+                    if let Some(ws) = group.iter_mut().find(|w| w.handle == *proxy) {
+                        ws.active = is_active;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }

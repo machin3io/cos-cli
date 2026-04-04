@@ -2,6 +2,8 @@ use cosmic_protocols::toplevel_info::v1::client::zcosmic_toplevel_handle_v1;
 use cosmic_protocols::toplevel_management::v1::client::zcosmic_toplevel_manager_v1;
 use std::error::Error;
 use std::fmt;
+use std::fs;
+use std::path::Path;
 
 use wayland_client::{
     Connection, EventQueue,
@@ -51,6 +53,7 @@ Options for 'state':
 Options for 'workspace':
   -w, --workspace <NAME>        The name of the target workspace
   -g, --workspace-group <INDEX> The workspace group index from 'info' command (optional)
+  --toggle                      Switch to the previous workspace
 
 Options for 'info':
   --json                        Output in JSON format
@@ -67,6 +70,7 @@ Examples:
   cos-cli activate -i 0
   cos-cli workspace -w 2
   cos-cli workspace -w 3 -g 0
+  cos-cli workspace --toggle
   cos-cli state -i 0 --maximize
   cos-cli state --app-id firefox --sticky --fullscreen
 ";
@@ -109,8 +113,14 @@ impl From<&str> for CliError {
     }
 }
 
+struct Workspace {
+    name: String,
+    handle: ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+    active: bool,
+}
+
 struct AppState {
-    workspace_group: Vec<Vec<(String, ext_workspace_handle_v1::ExtWorkspaceHandleV1)>>,
+    workspace_group: Vec<Vec<Workspace>>,
     workspace_manager: Option<ext_workspace_manager_v1::ExtWorkspaceManagerV1>,
     cosmic_toplevel_manager: Option<zcosmic_toplevel_manager_v1::ZcosmicToplevelManagerV1>,
     outputs: Vec<(wl_output::WlOutput, String)>,
@@ -228,8 +238,9 @@ impl AppFinderArgs for StateArgs {
 
 #[derive(Debug)]
 struct WorkspaceArgs {
-    workspace_name: String,
+    workspace_name: Option<String>,
     workspace_group_index: Option<usize>,
+    toggle: bool,
 }
 
 #[derive(Debug)]
@@ -390,9 +401,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Command::State(args)
         }
         Some("workspace") => {
+            let toggle = pargs.contains("--toggle");
+            let workspace_name: Option<String> = pargs.opt_value_from_str(["-w", "--workspace"])?;
+
+            if !toggle && workspace_name.is_none() {
+                return Err(CliError::new(
+                    "Either --workspace or --toggle must be provided for 'workspace' command.".into(),
+                ));
+            }
+
             Command::Workspace(WorkspaceArgs {
-                workspace_name: pargs.value_from_str(["-w", "--workspace"])?,
+                workspace_name,
                 workspace_group_index: pargs.opt_value_from_str(["-g", "--workspace-group"])?,
+                toggle,
             })
         }
         Some("help") | None => {
@@ -457,11 +478,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         json.push(',');
                     }
                     json.push_str(&format!("{{\"index\":{},\"workspaces\":[", i));
-                    for (j, (workspace, _)) in group.iter().enumerate() {
+                    for (j, ws) in group.iter().enumerate() {
                         if j > 0 {
                             json.push(',');
                         }
-                        json.push_str(&format!("{{\"name\":\"{}\"}}", json_escape(workspace)));
+                        json.push_str(&format!(
+                            "{{\"name\":\"{}\",\"active\":{}}}",
+                            json_escape(&ws.name),
+                            ws.active,
+                        ));
                     }
                     json.push_str("]}");
                 }
@@ -515,8 +540,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Workspaces:");
                 for (i, group) in state.workspace_group.iter().enumerate() {
                     println!("\t[{i}] Group");
-                    for (workspace, _) in group {
-                        println!("\t\tWorkspace: {workspace}");
+                    for ws in group {
+                        let active = if ws.active { " (active)" } else { "" };
+                        println!("\t\tWorkspace: {}{}", ws.name, active);
                     }
                 }
                 println!("Outputs:");
@@ -540,9 +566,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             println!("Connected to cosmic toplevel manager!");
 
-            let Some((_, workspace)) = (if let Some(group_index) = args.workspace_group_index {
+            let Some(ws) = (if let Some(group_index) = args.workspace_group_index {
                 if let Some(group) = state.workspace_group.get(group_index) {
-                    group.iter().find(|(w, _)| w == &args.workspace_name)
+                    group.iter().find(|ws| ws.name == args.workspace_name)
                 } else {
                     return Err(CliError::new(format!(
                         "Workspace group not found: {}",
@@ -554,7 +580,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .workspace_group
                     .iter()
                     .flat_map(|v| v.iter())
-                    .find(|(w, _)| w == &args.workspace_name)
+                    .find(|ws| ws.name == args.workspace_name)
             }) else {
                 return Err(CliError::new(format!(
                     "Workspace not found: {}",
@@ -581,7 +607,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.app_id.as_deref().unwrap_or_default(),
                     args.workspace_name,
                 );
-                manager.move_to_ext_workspace(&app.handle, workspace, &output);
+                manager.move_to_ext_workspace(&app.handle, &ws.handle, &output);
             }
 
             conn.flush()?;
@@ -651,9 +677,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             conn.flush()?;
         }
         Command::Workspace(args) => {
-            let Some((_, workspace)) = (if let Some(group_index) = args.workspace_group_index {
+            let statefile = Path::new("/tmp/cos-cli-last-workspace");
+
+            // resolve the target workspace name
+            let target_name = if args.toggle {
+                if let Ok(prev) = fs::read_to_string(statefile) {
+                    let prev = prev.trim().to_string();
+                    if prev.is_empty() {
+                        return Err(CliError::new("no previous workspace recorded.".into()));
+                    }
+                    prev
+                } else {
+                    return Err(CliError::new("no previous workspace recorded.".into()));
+                }
+            } else {
+                args.workspace_name.unwrap()
+            };
+
+            // find the current active workspace
+            let current_name = state
+                .workspace_group
+                .iter()
+                .flat_map(|v| v.iter())
+                .find(|ws| ws.active)
+                .map(|ws| ws.name.clone());
+
+            // find the target workspace handle
+            let Some(ws) = (if let Some(group_index) = args.workspace_group_index {
                 if let Some(group) = state.workspace_group.get(group_index) {
-                    group.iter().find(|(w, _)| w == &args.workspace_name)
+                    group.iter().find(|ws| ws.name == target_name)
                 } else {
                     return Err(CliError::new(format!(
                         "Workspace group not found: {}",
@@ -665,11 +717,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .workspace_group
                     .iter()
                     .flat_map(|v| v.iter())
-                    .find(|(w, _)| w == &args.workspace_name)
+                    .find(|ws| ws.name == target_name)
             }) else {
                 return Err(CliError::new(format!(
                     "Workspace not found: {}",
-                    args.workspace_name
+                    target_name
                 )));
             };
 
@@ -679,7 +731,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
             };
 
-            workspace.activate();
+            // save current workspace to statefile before switching
+            if let Some(name) = current_name {
+                let _ = fs::write(statefile, &name);
+            }
+
+            ws.handle.activate();
             manager.commit();
             conn.flush()?;
         }
