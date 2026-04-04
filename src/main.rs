@@ -24,6 +24,8 @@ Commands:
   activate                      Activate an application on a specific seat
   state                         Set state of an application
   workspace                     Switch to a workspace
+  minimize                      Minimize the focused app (with history tracking)
+  unminimize                    Restore the last minimized app on the current workspace
 
 Options for 'move':
   -a, --app-id <ID>             The Application ID (partial match, case-insensitive)
@@ -71,6 +73,8 @@ Examples:
   cos-cli workspace -w 2
   cos-cli workspace -w 3 -g 0
   cos-cli workspace --toggle
+  cos-cli minimize
+  cos-cli unminimize
   cos-cli state -i 0 --maximize
   cos-cli state --app-id firefox --sticky --fullscreen
 ";
@@ -134,7 +138,6 @@ struct App {
     title: Option<String>,
     app_id: Option<String>,
     outputs: Vec<wl_output::WlOutput>,
-    // workspaces: Vec<zcosmic_workspace_handle_v1::ZcosmicWorkspaceHandleV1>,
     state: Vec<State>,
 }
 
@@ -254,6 +257,8 @@ enum Command {
     Activate(ActivateArgs),
     State(StateArgs),
     Workspace(WorkspaceArgs),
+    Minimize,
+    Unminimize,
 }
 
 fn find_apps<T: AppFinderArgs>(
@@ -416,6 +421,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 toggle,
             })
         }
+        Some("minimize") => Command::Minimize,
+        Some("unminimize") => Command::Unminimize,
         Some("help") | None => {
             println!("{HELP}");
             return Ok(());
@@ -738,6 +745,106 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             ws.handle.activate();
             manager.commit();
+            conn.flush()?;
+        }
+        Command::Minimize => {
+            let minimize_stack = Path::new("/tmp/cos-cli-minimized");
+
+            let Some(manager) = &state.cosmic_toplevel_manager else {
+                return Err(CliError::new(
+                    "Compositor does not support toplevel management protocol.".into(),
+                ));
+            };
+
+            // find the focused app
+            let Some((app_index, app)) = state.apps.iter().enumerate().find(|(_, a)| a.state.contains(&State::Activated)) else {
+                return Err(CliError::new("no focused app found.".into()));
+            };
+
+            // find the current active workspace
+            let current_ws = state
+                .workspace_group
+                .iter()
+                .flat_map(|v| v.iter())
+                .find(|ws| ws.active)
+                .map(|ws| ws.name.as_str())
+                .unwrap_or("?");
+
+            let title = app.title.as_deref().unwrap_or("?");
+
+            // push to minimize stack: workspace:index:app_id:title
+            let entry = format!("{}:{}:{}:{}", current_ws, app_index, app.app_id.as_deref().unwrap_or("?"), title);
+            let mut stack = fs::read_to_string(minimize_stack).unwrap_or_default();
+            stack.push_str(&entry);
+            stack.push('\n');
+            let _ = fs::write(minimize_stack, &stack);
+
+            // minimize the app
+            manager.set_minimized(&app.handle);
+            conn.flush()?;
+        }
+        Command::Unminimize => {
+            let minimize_stack = Path::new("/tmp/cos-cli-minimized");
+
+            let Some(manager) = &state.cosmic_toplevel_manager else {
+                return Err(CliError::new(
+                    "Compositor does not support toplevel management protocol.".into(),
+                ));
+            };
+
+            // find the current active workspace
+            let current_ws = state
+                .workspace_group
+                .iter()
+                .flat_map(|v| v.iter())
+                .find(|ws| ws.active)
+                .map(|ws| ws.name.clone())
+                .unwrap_or_default();
+
+            // read the minimize stack
+            let stack_content = fs::read_to_string(minimize_stack).unwrap_or_default();
+            let mut lines: Vec<&str> = stack_content.lines().collect();
+
+            // find the last entry for the current workspace (search from the end)
+            let Some(pos) = lines.iter().rposition(|line| line.starts_with(&format!("{}:", current_ws))) else {
+                return Err(CliError::new(format!("no minimized apps on workspace {}.", current_ws)));
+            };
+
+            let entry = lines[pos];
+            let parts: Vec<&str> = entry.splitn(4, ':').collect();
+
+            if parts.len() < 3 {
+                return Err(CliError::new("corrupt minimize stack entry.".into()));
+            }
+
+            let app_id = parts[2];
+            let title = if parts.len() >= 4 { parts[3] } else { "" };
+
+            // find a minimized app matching app_id + title, fall back to app_id only
+            let app = state.apps.iter().find(|a| {
+                a.app_id.as_deref() == Some(app_id)
+                    && a.state.contains(&State::Minimized)
+                    && !title.is_empty()
+                    && a.title.as_deref() == Some(title)
+            }).or_else(|| {
+                state.apps.iter().find(|a| {
+                    a.app_id.as_deref() == Some(app_id) && a.state.contains(&State::Minimized)
+                })
+            });
+
+            let Some(app) = app else {
+                // app no longer minimized or gone, remove the stale entry
+                lines.remove(pos);
+                let _ = fs::write(minimize_stack, lines.join("\n") + if lines.is_empty() { "" } else { "\n" });
+                return Err(CliError::new(format!("app '{}' is no longer minimized.", app_id)));
+            };
+
+            // remove the entry from the stack
+            lines.remove(pos);
+            let _ = fs::write(minimize_stack, lines.join("\n") + if lines.is_empty() { "" } else { "\n" });
+
+            // unminimize the app
+            manager.unset_minimized(&app.handle);
             conn.flush()?;
         }
     };

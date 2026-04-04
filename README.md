@@ -111,6 +111,33 @@ Super+0                   →  cos-cli workspace -w 10
 Super+Escape              →  cos-cli workspace --toggle
 ````
 
+#### `minimize`
+Minimize the currently focused app with per-workspace history tracking.
+````console
+cos-cli minimize
+````
+
+Finds the focused (activated) app, minimizes it, and pushes an entry onto a statefile at `/tmp/cos-cli-minimized` recording the workspace, app index, and app_id.
+
+#### `unminimize`
+Restore the most recently minimized app on the current workspace.
+````console
+cos-cli unminimize
+````
+
+Reads the minimize stack, finds the most recent entry matching the current active workspace, and unminimizes that app. Stale entries (apps that were closed or manually unminimized) are cleaned up automatically.
+
+##### Why a statefile?
+
+COSMIC's Wayland compositor uses two separate workspace protocols: `ext_workspace_v1` (for workspace switching) and the older `zcosmic_workspace_v1` (for per-app workspace associations via the toplevel protocol). On current COSMIC versions, the zcosmic workspace protocol is no longer advertised, which means there is no way to query which workspace an app belongs to via the Wayland protocol alone.
+
+The statefile approach tracks minimize history per workspace by recording the active workspace at the time of minimization. This only tracks minimizations done through cos-cli — apps minimized via the UI or other means won't appear in the history.
+
+````
+Super+N        →  cos-cli minimize
+Super+Ctrl+N   →  cos-cli unminimize
+````
+
 #### `move`
 Move an application to a specific workspace.
 ````console
