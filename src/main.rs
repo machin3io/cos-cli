@@ -24,6 +24,7 @@ Commands:
   activate                      Activate an application on a specific seat
   state                         Set state of an application
   workspace                     Switch to a workspace
+  move-to                       Move the focused app to a specific workspace
   minimize                      Minimize the focused app (with history tracking)
   unminimize                    Restore the last minimized app on the current workspace
 
@@ -62,6 +63,9 @@ Options for 'workspace':
   --no-dynamic                  Auto-detect max by ignoring the trailing dynamic workspace
                                 COSMIC adds after pinned ones (use with --next/--prev)
 
+Options for 'move-to':
+  -w, --workspace <NAME>        The name of the target workspace
+
 Options for 'info':
   --json                        Output in JSON format
 
@@ -83,6 +87,8 @@ Examples:
   cos-cli workspace --next --no-dynamic
   cos-cli workspace --prev --no-dynamic
   cos-cli workspace --next --max 12
+  cos-cli move-to -w 5
+  cos-cli move-to -w 10
   cos-cli minimize
   cos-cli unminimize
   cos-cli state -i 0 --maximize
@@ -271,6 +277,7 @@ enum Command {
     Activate(ActivateArgs),
     State(StateArgs),
     Workspace(WorkspaceArgs),
+    MoveTo(String),
     Minimize,
     Unminimize,
 }
@@ -442,6 +449,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 max,
                 no_dynamic,
             })
+        }
+        Some("move-to") => {
+            Command::MoveTo(pargs.value_from_str(["-w", "--workspace"])?)
         }
         Some("minimize") => Command::Minimize,
         Some("unminimize") => Command::Unminimize,
@@ -788,6 +798,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             ws.handle.activate();
             manager.commit();
+            conn.flush()?;
+        }
+        Command::MoveTo(workspace_name) => {
+            let Some(manager) = &state.cosmic_toplevel_manager else {
+                return Err(CliError::new(
+                    "Compositor does not support toplevel management protocol.".into(),
+                ));
+            };
+
+            // find the focused app
+            let Some(app) = state.apps.iter().find(|a| a.state.contains(&State::Activated)) else {
+                return Err(CliError::new("no focused app found.".into()));
+            };
+
+            // find the target workspace
+            let Some(ws) = state.workspace_group.iter().flat_map(|v| v.iter()).find(|ws| ws.name == workspace_name) else {
+                return Err(CliError::new(format!("Workspace not found: {}", workspace_name)));
+            };
+
+            // find the output
+            let output = if state.outputs.is_empty() {
+                return Err(CliError::new("No outputs found.".to_string()));
+            } else {
+                state.outputs[0].0.clone()
+            };
+
+            manager.move_to_ext_workspace(&app.handle, &ws.handle, &output);
             conn.flush()?;
         }
         Command::Minimize => {
