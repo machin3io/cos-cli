@@ -103,6 +103,8 @@ pub fn daemon_running() -> bool {
 
 
 pub fn send_command(cmd: &str) -> Result<String, String> {
+    use std::io::Read;
+
     let path = socket_path();
 
     let mut stream = UnixStream::connect(&path).map_err(|e| format!("failed to connect to daemon: {}", e))?;
@@ -111,9 +113,11 @@ pub fn send_command(cmd: &str) -> Result<String, String> {
     stream.write_all(b"\n").map_err(|e| format!("failed to send newline: {}", e))?;
     stream.flush().map_err(|e| format!("failed to flush: {}", e))?;
 
-    let mut reader = BufReader::new(&stream);
+    // shut down the write end so the server knows we're done
+    stream.shutdown(std::net::Shutdown::Write).map_err(|e| format!("failed to shutdown write: {}", e))?;
+
     let mut response = String::new();
-    reader.read_line(&mut response).map_err(|e| format!("failed to read response: {}", e))?;
+    stream.read_to_string(&mut response).map_err(|e| format!("failed to read response: {}", e))?;
 
     Ok(response.trim().to_string())
 }
@@ -199,15 +203,20 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
         println!("initial state: {} windows on workspace {}", ds.windows.len(), ds.active_workspace);
     }
 
-    // main event loop
+    // main event loop — track changes, don't rebuild
     println!("entering event loop...");
+
+    // keep a snapshot of known app_id+title combos to detect new/removed windows
+    let mut known_keys: Vec<(String, String)> = wl_state.apps.iter().map(|a| {
+        (a.app_id.as_deref().unwrap_or("unknown").to_string(), a.title.as_deref().unwrap_or("").to_string())
+    }).collect();
 
     loop {
         event_queue.blocking_dispatch(&mut wl_state)?;
 
-        // sync workspace state
         let mut ds = state.lock().unwrap();
 
+        // sync workspace state from wayland
         for group in &wl_state.workspace_group {
             for ws in group {
                 if ws.active && ws.name != ds.active_workspace {
@@ -217,39 +226,69 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // sync window state
-        // NOTE: this is a simplified approach — we rebuild the window list each tick
-        // ####: a more sophisticated approach would track individual handle events
-        let prev_count = ds.windows.len();
-        ds.windows.clear();
-        ds.next_window_id = 0;
+        // build current app keys
+        let current_keys: Vec<(String, String)> = wl_state.apps.iter().map(|a| {
+            (a.app_id.as_deref().unwrap_or("unknown").to_string(), a.title.as_deref().unwrap_or("").to_string())
+        }).collect();
 
+        // detect new windows — assign to active workspace
+        for (app_id, title) in &current_keys {
+            if !known_keys.contains(&(app_id.clone(), title.clone())) {
+                let ws = ds.active_workspace.clone();
+                println!("new window: {} '{}' on workspace {}", app_id, title, ws);
+                ds.add_window(app_id, title, &ws);
+            }
+        }
+
+        // detect removed windows
+        let removed: Vec<u32> = ds.windows.iter()
+            .filter(|(_, w)| !current_keys.contains(&(w.app_id.clone(), w.title.clone())))
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in &removed {
+            if let Some(w) = ds.windows.get(id) {
+                println!("window removed: {} '{}'", w.app_id, w.title);
+            }
+            ds.windows.remove(id);
+        }
+
+        // update state (minimized, activated, etc.) on existing windows
         let active_ws = ds.active_workspace.clone();
 
         for app in &wl_state.apps {
             let app_id = app.app_id.as_deref().unwrap_or("unknown");
             let title = app.title.as_deref().unwrap_or("");
-
-            // if the app is activated, it's on the active workspace
-            let ws = if app.state.contains(&State::Activated) {
-                &active_ws
-            } else {
-                // for non-activated apps, check if we had a previous record
-                // otherwise assign to active workspace as a guess
-                &active_ws
-            };
-
-            let id = ds.add_window(app_id, title, ws);
-
             let states: Vec<String> = app.state.iter().map(|s| s.to_string()).collect();
-            if let Some(w) = ds.windows.get_mut(&id) {
-                w.state = states;
+
+            if let Some(w) = ds.windows.values_mut().find(|w| w.app_id == app_id && w.title == title) {
+                let old_state = w.state.clone();
+                w.state = states.clone();
+
+                // if the app just became activated, it's on the active workspace
+                if states.contains(&"activated".to_string()) && !old_state.contains(&"activated".to_string()) {
+                    println!("  activated: {} '{}' moved {} -> {}", app_id, title, w.workspace, active_ws);
+                    w.workspace = active_ws.clone();
+                }
             }
         }
 
-        if ds.windows.len() != prev_count {
-            println!("window count changed: {} -> {}", prev_count, ds.windows.len());
+        // update title changes on existing windows
+        for app in &wl_state.apps {
+            let app_id = app.app_id.as_deref().unwrap_or("unknown");
+            let title = app.title.as_deref().unwrap_or("");
+
+            // find a window with this app_id whose title changed
+            let has_existing = ds.windows.values().any(|w| w.app_id == app_id && w.title == title);
+
+            if !has_existing {
+                if let Some(w) = ds.windows.values_mut().find(|w| w.app_id == app_id && w.title != title) {
+                    w.title = title.to_string();
+                }
+            }
         }
+
+        known_keys = current_keys;
     }
 }
 
@@ -333,6 +372,12 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             out
+        }
+
+        "shutdown" => {
+            let _ = writer.write_all(b"bye\n");
+            let _ = writer.flush();
+            std::process::exit(0);
         }
 
         _ => "error:unknown command".to_string(),

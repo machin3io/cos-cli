@@ -27,6 +27,7 @@ Commands:
   workspace                     Switch to a workspace
   move-to                       Move the focused app to a specific workspace
   daemon                        Start the background daemon for persistent window tracking
+  query                         Query the daemon (default: info)
   gap                           Adjust window gaps on the current workspace
   minimize                      Minimize the focused app (with history tracking)
   unminimize                    Restore the last minimized app on the current workspace
@@ -100,6 +101,13 @@ Examples:
   cos-cli gap --decrease
   cos-cli minimize
   cos-cli unminimize
+  cos-cli daemon
+  cos-cli daemon --restart
+  cos-cli query
+  cos-cli query ping
+  cos-cli query active-workspace
+  cos-cli query visible-on 3
+  cos-cli query shutdown
   cos-cli state -i 0 --maximize
   cos-cli state --app-id firefox --sticky --fullscreen
 ";
@@ -476,7 +484,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("minimize") => Command::Minimize,
         Some("unminimize") => Command::Unminimize,
-        Some("daemon") => Command::Daemon,
+        Some("daemon") => {
+            if pargs.contains("--restart") {
+                // kill existing daemon if running
+                let path = daemon::socket_path();
+                if path.exists() {
+                    let _ = daemon::send_command("shutdown");
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    let _ = fs::remove_file(&path);
+                }
+            }
+            Command::Daemon
+        }
+        Some("query") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let cmd = if args.is_empty() { "info".to_string() } else { args.join(" ") };
+
+            match daemon::send_command(&cmd) {
+                Ok(response) => println!("{}", response),
+                Err(e) => eprintln!("{}", e),
+            }
+            return Ok(());
+        }
         Some("help") | None => {
             println!("{HELP}");
             return Ok(());
@@ -829,6 +858,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // apply per-workspace gaps
             apply_gaps(&target_name);
+
+            // notify daemon of workspace change
+            let _ = daemon::send_command(&format!("set-workspace {}", target_name));
         }
         Command::Gap(delta) => {
             // find the current active workspace
@@ -868,6 +900,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             manager.move_to_ext_workspace(&app.handle, &ws.handle, &output);
             conn.flush()?;
+
+            // notify daemon of window move
+            if let Some(app_id) = &app.app_id {
+                let _ = daemon::send_command(&format!("move-window {}:{}", app_id, workspace_name));
+            }
         }
         Command::Minimize => {
             let minimize_stack = Path::new("/tmp/cos-cli-minimized");
