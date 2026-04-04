@@ -14,6 +14,7 @@ A CLI tool for managing windows and workspaces on the COSMIC Desktop Environment
 - **Workspace Switching**: Switch directly to any workspace by name, or cycle with next/prev (with wrapping and optional dynamic workspace exclusion).
 - **Workspace Toggle**: Switch back and forth between the last two workspaces via statefile history.
 - **Minimize/Unminimize**: Minimize the focused app with per-workspace history, unminimize the last minimized app on the current workspace.
+- **Per-Workspace Gaps**: Automatically apply window gap settings per workspace, with keybinds to adjust on the fly.
 
 ## Installation
 Ensure you have the Rust toolchain installed.
@@ -143,6 +144,36 @@ The statefile approach tracks minimize history per workspace by recording the ac
 ````
 Super+N        →  cos-cli minimize
 Super+Ctrl+N   →  cos-cli unminimize
+````
+
+#### `gap`
+Adjust window gaps on the current workspace.
+````console
+cos-cli gap --increase
+cos-cli gap --decrease
+````
+Arguments:
+*   `--increase`
+    Increase the outer gap by 10
+*   `--decrease`
+    Decrease the outer gap by 10
+
+Gap settings are stored per workspace in `~/.config/cosmic/cos-cli/gaps`. The file is plain text, one entry per line:
+
+````
+# per-workspace gaps: workspace:inner,outer
+# "default" is used as fallback for unlisted workspaces
+default:0,30
+1:0,40
+3:0,0
+5:0,30
+````
+
+When switching workspaces (via any `cos-cli workspace` command), the gap for the target workspace is automatically applied by writing to `~/.config/cosmic/com.system76.CosmicTheme.Dark/v1/gaps`, which COSMIC hot-reloads.
+
+````
+Super+Ctrl+Shift+=  →  cos-cli gap --increase
+Super+Ctrl+-        →  cos-cli gap --decrease
 ````
 
 #### `move`

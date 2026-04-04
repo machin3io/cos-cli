@@ -25,6 +25,7 @@ Commands:
   state                         Set state of an application
   workspace                     Switch to a workspace
   move-to                       Move the focused app to a specific workspace
+  gap                           Adjust window gaps on the current workspace
   minimize                      Minimize the focused app (with history tracking)
   unminimize                    Restore the last minimized app on the current workspace
 
@@ -66,6 +67,10 @@ Options for 'workspace':
 Options for 'move-to':
   -w, --workspace <NAME>        The name of the target workspace
 
+Options for 'gap':
+  --increase                    Increase outer gap by 5
+  --decrease                    Decrease outer gap by 5
+
 Options for 'info':
   --json                        Output in JSON format
 
@@ -89,6 +94,8 @@ Examples:
   cos-cli workspace --next --max 12
   cos-cli move-to -w 5
   cos-cli move-to -w 10
+  cos-cli gap --increase
+  cos-cli gap --decrease
   cos-cli minimize
   cos-cli unminimize
   cos-cli state -i 0 --maximize
@@ -278,6 +285,7 @@ enum Command {
     State(StateArgs),
     Workspace(WorkspaceArgs),
     MoveTo(String),
+    Gap(i32),
     Minimize,
     Unminimize,
 }
@@ -452,6 +460,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("move-to") => {
             Command::MoveTo(pargs.value_from_str(["-w", "--workspace"])?)
+        }
+        Some("gap") => {
+            let increase = pargs.contains("--increase");
+            let decrease = pargs.contains("--decrease");
+
+            if !increase && !decrease {
+                return Err(CliError::new("Either --increase or --decrease must be provided for 'gap' command.".into()));
+            }
+
+            Command::Gap(if increase { 10 } else { -10 })
         }
         Some("minimize") => Command::Minimize,
         Some("unminimize") => Command::Unminimize,
@@ -799,6 +817,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ws.handle.activate();
             manager.commit();
             conn.flush()?;
+
+            // apply per-workspace gaps
+            apply_gaps(&target_name);
+        }
+        Command::Gap(delta) => {
+            // find the current active workspace
+            let current_ws = state
+                .workspace_group
+                .iter()
+                .flat_map(|v| v.iter())
+                .find(|ws| ws.active)
+                .map(|ws| ws.name.clone())
+                .unwrap_or_else(|| "1".to_string());
+
+            adjust_gaps(&current_ws, delta);
         }
         Command::MoveTo(workspace_name) => {
             let Some(manager) = &state.cosmic_toplevel_manager else {
@@ -934,4 +967,126 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn json_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+
+const GAPS_CONFIG: &str = ".config/cosmic/cos-cli/gaps";
+const COSMIC_GAPS: &str = ".config/cosmic/com.system76.CosmicTheme.Dark/v1/gaps";
+const DEFAULT_GAP: (u32, u32) = (0, 30);
+
+
+fn gaps_config_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/x".to_string());
+    Path::new(&home).join(GAPS_CONFIG)
+}
+
+
+fn cosmic_gaps_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/x".to_string());
+    Path::new(&home).join(COSMIC_GAPS)
+}
+
+
+fn read_gaps_config() -> Vec<(String, u32, u32)> {
+    // read the gaps config file, returns a list of (workspace_name, inner, outer) tuples
+    // format: workspace:inner,outer (one per line, # comments, "default" key for fallback)
+
+    let path = gaps_config_path();
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    content.lines().filter_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let parts: Vec<&str> = line.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let vals: Vec<&str> = parts[1].split(',').collect();
+        if vals.len() != 2 {
+            return None;
+        }
+        let inner = vals[0].trim().parse::<u32>().ok()?;
+        let outer = vals[1].trim().parse::<u32>().ok()?;
+        Some((parts[0].trim().to_string(), inner, outer))
+    }).collect()
+}
+
+
+fn get_gaps_for_workspace(workspace: &str) -> (u32, u32) {
+    let config = read_gaps_config();
+
+    // look for exact workspace match first
+    if let Some((_, inner, outer)) = config.iter().find(|(ws, _, _)| ws == workspace) {
+        return (*inner, *outer);
+    }
+
+    // fall back to default entry
+    if let Some((_, inner, outer)) = config.iter().find(|(ws, _, _)| ws == "default") {
+        return (*inner, *outer);
+    }
+
+    DEFAULT_GAP
+}
+
+
+fn apply_gaps(workspace: &str) {
+    let config_path = gaps_config_path();
+
+    // create the config dir and a default template if missing
+    if !config_path.exists() {
+        if let Some(parent) = config_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+
+        let template = "# per-workspace gaps: workspace:inner,outer\n# \"default\" is used as fallback for unlisted workspaces\ndefault:0,30\n";
+        let _ = fs::write(&config_path, template);
+    }
+
+    let (inner, outer) = get_gaps_for_workspace(workspace);
+    let content = format!("({}, {})\n", inner, outer);
+    let _ = fs::write(cosmic_gaps_path(), content);
+}
+
+
+fn adjust_gaps(workspace: &str, delta: i32) {
+    let (inner, outer) = get_gaps_for_workspace(workspace);
+
+    let new_outer = (outer as i32 + delta).max(0) as u32;
+
+    // update or add the entry for this workspace
+    let path = gaps_config_path();
+    let mut lines: Vec<String> = Vec::new();
+    let mut found = false;
+
+    if let Ok(content) = fs::read_to_string(&path) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                if let Some(ws) = trimmed.split(':').next() {
+                    if ws.trim() == workspace {
+                        lines.push(format!("{}:{},{}", workspace, inner, new_outer));
+                        found = true;
+                        continue;
+                    }
+                }
+            }
+            lines.push(line.to_string());
+        }
+    }
+
+    if !found {
+        lines.push(format!("{}:{},{}", workspace, inner, new_outer));
+    }
+
+    lines.push(String::new());
+    let _ = fs::write(&path, lines.join("\n"));
+
+    // apply immediately
+    let content = format!("({}, {})\n", inner, new_outer);
+    let _ = fs::write(cosmic_gaps_path(), content);
 }
