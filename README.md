@@ -19,19 +19,13 @@ A CLI tool for managing windows and workspaces on the COSMIC Desktop Environment
 Ensure you have the Rust toolchain installed.
 
 ````console
-cargo build --release
+cargo install --git https://github.com/machin3io/cos-cli
 ````
 
-or from github directly
+For the upstream version (without workspace switching, minimize history, etc.):
 
 ````console
 cargo install --git https://github.com/estin/cos-cli
-````
-
-For the machin3 fork:
-
-````console
-./build.sh    # builds and installs to ~/.cargo/bin/cos-cli
 ````
 
 ## Usage
