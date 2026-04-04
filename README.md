@@ -4,15 +4,16 @@ A CLI tool for managing windows and workspaces on the COSMIC Desktop Environment
 
 > **Note:** This is a third-party, unofficial tool. It is not affiliated with System76 or the official COSMIC project.
 
-> **Fork note:** This is a `machin3` fork (`workspace_control` branch) adding the `workspace` subcommand for direct workspace switching and toggle. The upstream repo is [estin/cos-cli](https://github.com/estin/cos-cli).
+> **Fork note:** This is a `machin3` fork (`workspace_control` branch). The upstream repo is [estin/cos-cli](https://github.com/estin/cos-cli).
 
 ## Features
 - **List Information**: View active applications, workspaces (with active state), and outputs.
 - **Window Management**: Move applications between workspaces by their App ID.
 - **Activate Application**: Bring a specific application to the foreground.
 - **Window State**: Set window state (maximize, minimize, fullscreen, sticky).
-- **Workspace Switching**: Switch directly to any workspace by name.
-- **Workspace Toggle**: Switch back and forth between the last two workspaces.
+- **Workspace Switching**: Switch directly to any workspace by name, or cycle with next/prev (with wrapping and optional dynamic workspace exclusion).
+- **Workspace Toggle**: Switch back and forth between the last two workspaces via statefile history.
+- **Minimize/Unminimize**: Minimize the focused app with per-workspace history, unminimize the last minimized app on the current workspace.
 
 ## Installation
 Ensure you have the Rust toolchain installed.
@@ -90,6 +91,16 @@ Arguments:
     The workspace group index from 'info' command (optional, only needed for multi-monitor setups)
 *   `--toggle`
     Switch to the previous workspace
+*   `--next`
+    Switch to the next workspace (wraps around from last to first)
+*   `--prev`
+    Switch to the previous workspace (wraps around from first to last)
+*   `--no-dynamic`
+    Auto-detect the highest workspace by ignoring the trailing dynamic workspace COSMIC adds after pinned ones (use with `--next`/`--prev`)
+*   `--max <N>`
+    Explicitly set the highest workspace number for `--next`/`--prev` (overrides `--no-dynamic`)
+
+Without `--no-dynamic` or `--max`, `--next`/`--prev` cycle through all workspaces including any dynamic ones.
 
 ##### Why this exists
 
@@ -109,6 +120,8 @@ COSMIC's built-in keyboard shortcuts only support Super+1 through Super+9 for di
 Super+1 through Super+9  →  cos-cli workspace -w 1  through  -w 9
 Super+0                   →  cos-cli workspace -w 10
 Super+Escape              →  cos-cli workspace --toggle
+Super+Right               →  cos-cli workspace --next --no-dynamic
+Super+Left                →  cos-cli workspace --prev --no-dynamic
 ````
 
 #### `minimize`

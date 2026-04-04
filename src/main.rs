@@ -56,6 +56,11 @@ Options for 'workspace':
   -w, --workspace <NAME>        The name of the target workspace
   -g, --workspace-group <INDEX> The workspace group index from 'info' command (optional)
   --toggle                      Switch to the previous workspace
+  --next                        Switch to the next workspace (wraps around)
+  --prev                        Switch to the previous workspace (wraps around)
+  --max <N>                     Highest workspace number for --next/--prev (overrides --no-dynamic)
+  --no-dynamic                  Auto-detect max by ignoring the trailing dynamic workspace
+                                COSMIC adds after pinned ones (use with --next/--prev)
 
 Options for 'info':
   --json                        Output in JSON format
@@ -73,6 +78,11 @@ Examples:
   cos-cli workspace -w 2
   cos-cli workspace -w 3 -g 0
   cos-cli workspace --toggle
+  cos-cli workspace --next
+  cos-cli workspace --prev
+  cos-cli workspace --next --no-dynamic
+  cos-cli workspace --prev --no-dynamic
+  cos-cli workspace --next --max 12
   cos-cli minimize
   cos-cli unminimize
   cos-cli state -i 0 --maximize
@@ -244,6 +254,10 @@ struct WorkspaceArgs {
     workspace_name: Option<String>,
     workspace_group_index: Option<usize>,
     toggle: bool,
+    next: bool,
+    prev: bool,
+    max: Option<usize>,
+    no_dynamic: bool,
 }
 
 #[derive(Debug)]
@@ -407,11 +421,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("workspace") => {
             let toggle = pargs.contains("--toggle");
+            let next = pargs.contains("--next");
+            let prev = pargs.contains("--prev");
+            let no_dynamic = pargs.contains("--no-dynamic");
+            let max: Option<usize> = pargs.opt_value_from_str("--max")?;
             let workspace_name: Option<String> = pargs.opt_value_from_str(["-w", "--workspace"])?;
 
-            if !toggle && workspace_name.is_none() {
+            if !toggle && !next && !prev && workspace_name.is_none() {
                 return Err(CliError::new(
-                    "Either --workspace or --toggle must be provided for 'workspace' command.".into(),
+                    "One of --workspace, --toggle, --next, or --prev must be provided.".into(),
                 ));
             }
 
@@ -419,6 +437,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 workspace_name,
                 workspace_group_index: pargs.opt_value_from_str(["-g", "--workspace-group"])?,
                 toggle,
+                next,
+                prev,
+                max,
+                no_dynamic,
             })
         }
         Some("minimize") => Command::Minimize,
@@ -686,6 +708,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Workspace(args) => {
             let statefile = Path::new("/tmp/cos-cli-last-workspace");
 
+            // find the current active workspace number
+            let current_num: usize = state
+                .workspace_group
+                .iter()
+                .flat_map(|v| v.iter())
+                .find(|ws| ws.active)
+                .and_then(|ws| ws.name.parse().ok())
+                .unwrap_or(1);
+
+            // resolve the max workspace number
+            let ws_max = if let Some(m) = args.max {
+                m
+            } else if args.no_dynamic {
+                // total workspace count minus the trailing dynamic one
+                let total: usize = state.workspace_group.iter().map(|g| g.len()).sum();
+                if total > 1 { total - 1 } else { total }
+            } else {
+                // default: use total workspace count as-is
+                state.workspace_group.iter().map(|g| g.len()).sum::<usize>().max(1)
+            };
+
             // resolve the target workspace name
             let target_name = if args.toggle {
                 if let Ok(prev) = fs::read_to_string(statefile) {
@@ -697,17 +740,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     return Err(CliError::new("no previous workspace recorded.".into()));
                 }
+            } else if args.next {
+                let next = if current_num >= ws_max { 1 } else { current_num + 1 };
+                next.to_string()
+            } else if args.prev {
+                let prev = if current_num <= 1 { ws_max } else { current_num - 1 };
+                prev.to_string()
             } else {
                 args.workspace_name.unwrap()
             };
 
-            // find the current active workspace
-            let current_name = state
-                .workspace_group
-                .iter()
-                .flat_map(|v| v.iter())
-                .find(|ws| ws.active)
-                .map(|ws| ws.name.clone());
+            let current_name = Some(current_num.to_string());
 
             // find the target workspace handle
             let Some(ws) = (if let Some(group_index) = args.workspace_group_index {
