@@ -23,6 +23,23 @@ A CLI tool for managing windows and workspaces on the COSMIC Desktop Environment
 - **Per-Workspace Gaps**: Automatically apply window gap settings per workspace, with keybinds to adjust on the fly.
 - **Daemon Mode**: Persistent background process that tracks windows across workspaces via Wayland handle IDs, enabling accurate focus detection, skip-empty cycling, and per-workspace queries.
 
+## Daemon (recommended)
+
+The daemon (`cos-cli daemon`) is a persistent background process that maintains a live Wayland connection, tracking all windows by their unique protocol handle IDs. It is strongly recommended for the best experience.
+
+**With the daemon**, commands like `move-to`, `minimize`, and `unminimize` are executed by the daemon itself using stable handle IDs — no ambiguity when multiple windows share the same app ID or title. The daemon also enables:
+- **Skip-empty cycling** — knows which workspaces have visible windows
+- **Auto-maximize** — automatically maximizes the sole window on zero-gap workspaces, and undoes it when a second window appears
+- **Accurate focus detection** — tracks activation timestamps to resolve COSMIC's multiple-activated-window quirk
+- **Verbose logging** — all window events, focus changes, workspace switches, and command actions in one place
+
+**Without the daemon**, basic commands still work (workspace switching, gap adjustment, toggle) but `move-to`, `minimize`, and `unminimize` fall back to less reliable matching, and features like skip-empty cycling and auto-maximize are unavailable.
+
+Start the daemon on login or as a systemd user service:
+````console
+cos-cli daemon
+````
+
 ## Installation
 Ensure you have the Rust toolchain installed.
 
@@ -180,10 +197,19 @@ default:0,30
 
 When switching workspaces (via any `cos-cli workspace` command), the gap for the target workspace is automatically applied by writing to `~/.config/cosmic/com.system76.CosmicTheme.Dark/v1/gaps`, which COSMIC hot-reloads.
 
+On zero-gap workspaces with a single visible window, the window is automatically maximized to remove the remaining border and rounded corners. When a second window appears (new window, unminimize, move-to), only auto-maximized windows are unmaximized — manually maximized windows are left untouched. This behavior can be disabled via the `auto_maximize` config file.
+
 ````
 Super+Ctrl+Shift+=  →  cos-cli gap --increase
 Super+Ctrl+-        →  cos-cli gap --decrease
 ````
+
+## Configuration
+
+All config files live in `~/.config/cosmic/cos-cli/`:
+
+*   **`gaps`** — per-workspace gap settings (inner,outer). Created automatically with defaults on first use.
+*   **`auto_maximize`** — `true` (default) or `false`. Controls whether a sole visible window on a zero-gap workspace is automatically maximized.
 
 #### `move`
 Move an application to a specific workspace.

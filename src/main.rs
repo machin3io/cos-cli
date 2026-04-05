@@ -72,8 +72,12 @@ Options for 'move-to':
   -w, --workspace <NAME>        The name of the target workspace
 
 Options for 'gap':
-  --increase                    Increase outer gap by 5
-  --decrease                    Decrease outer gap by 5
+  --increase                    Increase outer gap by 10
+  --decrease                    Decrease outer gap by 10
+
+Config files (~/.config/cosmic/cos-cli/):
+  gaps                          Per-workspace gap settings (workspace:inner,outer)
+  auto_maximize                 Auto-maximize sole window on zero-gap workspaces (true/false)
 
 Options for 'info':
   --json                        Output in JSON format
