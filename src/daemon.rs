@@ -47,8 +47,6 @@ pub fn daemon_log(msg: &str) {
 // actions that the IPC handler queues for the event loop to execute
 #[derive(Debug)]
 pub enum PendingAction {
-    Maximize(String),         // handle_id
-    Unmaximize(String),       // handle_id
     AutoMaximize(String),     // workspace name
     UnmaximizeAll(String),    // workspace name
     MoveFocusedTo(String),    // target workspace name
@@ -249,33 +247,6 @@ pub fn socket_path() -> PathBuf {
 }
 
 
-pub fn daemon_running() -> bool {
-    let path = socket_path();
-
-    if !path.exists() {
-        return false;
-    }
-
-    match UnixStream::connect(&path) {
-        Ok(mut stream) => {
-            let _ = stream.write_all(b"ping\n");
-            let _ = stream.flush();
-
-            let mut reader = BufReader::new(&stream);
-            let mut response = String::new();
-
-            if reader.read_line(&mut response).is_ok() {
-                response.trim() == "pong"
-            } else {
-                false
-            }
-        }
-        Err(_) => {
-            let _ = fs::remove_file(&path);
-            false
-        }
-    }
-}
 
 
 pub fn send_command(cmd: &str) -> Result<String, String> {
@@ -382,22 +353,6 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 PendingAction::UnmaximizeAll(workspace) => {
                     process_unmaximize_all(&state, &wl_state, &conn, &workspace);
-                }
-                PendingAction::Maximize(hid) => {
-                    if let Some(manager) = &wl_state.cosmic_toplevel_manager {
-                        if let Some(app) = wl_state.apps.iter().find(|a| handle_id(&a.handle) == hid) {
-                            manager.set_maximized(&app.handle);
-                            conn.flush().ok();
-                        }
-                    }
-                }
-                PendingAction::Unmaximize(hid) => {
-                    if let Some(manager) = &wl_state.cosmic_toplevel_manager {
-                        if let Some(app) = wl_state.apps.iter().find(|a| handle_id(&a.handle) == hid) {
-                            manager.unset_maximized(&app.handle);
-                            conn.flush().ok();
-                        }
-                    }
                 }
             }
         }

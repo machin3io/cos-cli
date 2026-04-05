@@ -33,7 +33,7 @@ The daemon (`cos-cli daemon`) is a persistent background process that maintains 
 - **Accurate focus detection** — tracks activation timestamps to resolve COSMIC's multiple-activated-window quirk
 - **Verbose logging** — all window events, focus changes, workspace switches, and command actions in one place
 
-**Without the daemon**, basic commands still work (workspace switching, gap adjustment, toggle) but `move-to`, `minimize`, and `unminimize` fall back to less reliable matching, and features like skip-empty cycling and auto-maximize are unavailable.
+**Without the daemon**, basic commands still work (workspace switching, gap adjustment, toggle) but `move-to` falls back to less reliable matching, `minimize` and `unminimize` are unavailable, and features like skip-empty cycling and auto-maximize are disabled.
 
 Start the daemon on login or as a systemd user service:
 ````console
@@ -146,26 +146,20 @@ Super+Alt+Left            →  cos-cli workspace --prev --skip-empty --no-dynami
 ````
 
 #### `minimize`
-Minimize the currently focused app with per-workspace history tracking.
+Minimize the currently focused app with per-workspace history tracking. **Requires the daemon.**
 ````console
 cos-cli minimize
 ````
 
-Finds the focused (activated) app, minimizes it, and pushes an entry onto a statefile at `/tmp/cos-cli-minimized` recording the workspace, app index, and app_id.
+The daemon identifies the focused window by its Wayland handle ID and minimizes it, tracking it in per-workspace history.
 
 #### `unminimize`
-Restore the most recently minimized app on the current workspace.
+Restore the most recently minimized app on the current workspace. **Requires the daemon.**
 ````console
 cos-cli unminimize
 ````
 
-Reads the minimize stack, finds the most recent entry matching the current active workspace, and unminimizes that app. Stale entries (apps that were closed or manually unminimized) are cleaned up automatically.
-
-##### Why a statefile?
-
-COSMIC's Wayland compositor uses two separate workspace protocols: `ext_workspace_v1` (for workspace switching) and the older `zcosmic_workspace_v1` (for per-app workspace associations via the toplevel protocol). On current COSMIC versions, the zcosmic workspace protocol is no longer advertised, which means there is no way to query which workspace an app belongs to via the Wayland protocol alone.
-
-The statefile approach tracks minimize history per workspace by recording the active workspace at the time of minimization. This only tracks minimizations done through cos-cli — apps minimized via the UI or other means won't appear in the history.
+The daemon tracks minimize history per workspace and restores the most recently minimized app. Relies on handle IDs for accurate window identification — earlier statefile-based approaches couldn't uniquely identify windows when multiple instances of the same app were open (e.g. multiple terminals).
 
 ````
 Super+N        →  cos-cli minimize
@@ -296,7 +290,7 @@ The daemon maintains a persistent Wayland connection and tracks all windows usin
 
 Each window is identified by its Wayland protocol object ID, which is stable for the lifetime of the daemon. This avoids the ambiguity of matching by app_id or title, which are not unique (e.g. multiple terminal windows). Windows are assigned to the workspace that was active when they first appeared. Focus is tracked with activation timestamps, so when multiple windows report as activated (a COSMIC quirk), the most recently focused one on the active workspace is used.
 
-Commands like `move-to`, `minimize`, and `unminimize` query the daemon for the focused window when it's running, falling back to direct Wayland state when it's not.
+`minimize` and `unminimize` require the daemon for accurate window identification via handle IDs. `move-to` queries the daemon when available, falling back to direct Wayland state when it's not.
 
 #### `query`
 Query the daemon's tracked state.

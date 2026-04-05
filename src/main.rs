@@ -972,70 +972,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Minimize => {
-            // daemon handles this with correct handle IDs
-            if daemon::send_command("do-minimize").is_ok() {
-                // daemon handled it
-            } else {
-                // fallback: no daemon
-                let Some(manager) = &state.cosmic_toplevel_manager else {
-                    return Err(CliError::new("Compositor does not support toplevel management protocol.".into()));
-                };
-
-                let Some(app) = state.apps.iter().find(|a| a.state.contains(&State::Activated)) else {
-                    return Err(CliError::new("no focused app found.".into()));
-                };
-
-                manager.set_minimized(&app.handle);
-                conn.flush()?;
+            if daemon::send_command("do-minimize").is_err() {
+                return Err(CliError::new("minimize requires the daemon (cos-cli daemon).".into()));
             }
         }
         Command::Unminimize => {
-            // daemon handles this with correct handle IDs
-            if daemon::send_command("do-unminimize").is_ok() {
-                // daemon handled it
-            } else {
-                // fallback: no daemon, use statefile + direct wayland
-                let Some(manager) = &state.cosmic_toplevel_manager else {
-                    return Err(CliError::new("Compositor does not support toplevel management protocol.".into()));
-                };
-
-                let current_ws = state.workspace_group.iter().flat_map(|v| v.iter())
-                    .find(|ws| ws.active).map(|ws| ws.name.clone()).unwrap_or_default();
-
-                let minimize_stack = Path::new("/tmp/cos-cli-minimized");
-                let stack_content = fs::read_to_string(minimize_stack).unwrap_or_default();
-                let mut lines: Vec<&str> = stack_content.lines().collect();
-
-                let Some(pos) = lines.iter().rposition(|line| line.starts_with(&format!("{}:", current_ws))) else {
-                    return Err(CliError::new(format!("no minimized apps on workspace {}.", current_ws)));
-                };
-
-                let entry = lines[pos];
-                let parts: Vec<&str> = entry.splitn(4, ':').collect();
-
-                if parts.len() < 3 {
-                    return Err(CliError::new("corrupt minimize stack entry.".into()));
-                }
-
-                let app_id = parts[2];
-                let title = if parts.len() >= 4 { parts[3] } else { "" };
-
-                let app = state.apps.iter().find(|a| {
-                    a.app_id.as_deref() == Some(app_id) && a.state.contains(&State::Minimized)
-                        && (title.is_empty() || a.title.as_deref() == Some(title))
-                });
-
-                let Some(app) = app else {
-                    lines.remove(pos);
-                    let _ = fs::write(minimize_stack, lines.join("\n") + if lines.is_empty() { "" } else { "\n" });
-                    return Err(CliError::new(format!("app '{}' is no longer minimized.", app_id)));
-                };
-
-                lines.remove(pos);
-                let _ = fs::write(minimize_stack, lines.join("\n") + if lines.is_empty() { "" } else { "\n" });
-
-                manager.unset_minimized(&app.handle);
-                conn.flush()?;
+            if daemon::send_command("do-unminimize").is_err() {
+                return Err(CliError::new("unminimize requires the daemon (cos-cli daemon).".into()));
             }
         }
         Command::Daemon => unreachable!(),
