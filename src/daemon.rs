@@ -402,6 +402,13 @@ fn process_auto_maximize(
                         w.auto_maximized = true;
                     }
                 }
+
+                // activate the sole window so focused_window() can find it immediately
+                if let Some(seat) = wl_state.seats.first() {
+                    daemon_log(&format!("  auto-activate: {} '{}' on workspace {}", app_id, title, workspace));
+                    manager.activate(&app.handle, &seat.0);
+                    conn.flush().ok();
+                }
             }
         }
 
@@ -477,14 +484,22 @@ fn process_move_focused_to(
 ) {
     let ds = daemon_state.lock().unwrap();
 
-    // find the focused window (most recently activated on the active workspace)
-    let focused = ds.focused_window().map(|(id, w)| (id.clone(), w.app_id.clone(), w.title.clone()));
+    // find the focused window, fall back to sole visible window on the workspace
+    // (COSMIC may not have sent the activation event yet after a workspace switch)
+    let mut used_fallback = false;
+    let focused = ds.focused_window()
+        .or_else(|| { used_fallback = true; ds.sole_visible_on_workspace(&ds.active_workspace) })
+        .map(|(id, w)| (id.clone(), w.app_id.clone(), w.title.clone()));
     drop(ds);
 
     let Some((hid, app_id, title)) = focused else {
         daemon_log("  move-to: no focused window found");
         return;
     };
+
+    if used_fallback {
+        daemon_log(&format!("  move-to: using sole visible window {} '{}' (no activation event yet)", app_id, title));
+    }
 
     let Some(manager) = &wl_state.cosmic_toplevel_manager else { return; };
 
@@ -511,10 +526,14 @@ fn process_move_focused_to(
     manager.move_to_ext_workspace(&app.handle, &ws.handle, &output);
     conn.flush().ok();
 
-    // update daemon state
+    // update daemon state and trigger auto-maximize on the source workspace
     let mut ds = daemon_state.lock().unwrap();
+    let source_ws = ds.windows.get(&hid).map(|w| w.workspace.clone());
     if let Some(w) = ds.windows.get_mut(&hid) {
         w.workspace = target_workspace.to_string();
+    }
+    if let Some(ws) = source_ws {
+        ds.queue_auto_maximize(ws);
     }
 }
 
