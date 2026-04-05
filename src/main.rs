@@ -105,10 +105,12 @@ Examples:
   cos-cli minimize
   cos-cli unminimize
   cos-cli daemon
+  cos-cli daemon --verbose
   cos-cli daemon --restart
   cos-cli query
   cos-cli query ping
   cos-cli query active-workspace
+  cos-cli query focused
   cos-cli query visible-on 3
   cos-cli query shutdown
   cos-cli state -i 0 --maximize
@@ -166,6 +168,7 @@ struct AppState {
     outputs: Vec<(wl_output::WlOutput, String)>,
     seats: Vec<(wl_seat::WlSeat, String)>,
     apps: Vec<App>,
+    daemon_state: Option<std::sync::Arc<std::sync::Mutex<daemon::DaemonState>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -491,6 +494,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("minimize") => Command::Minimize,
         Some("unminimize") => Command::Unminimize,
         Some("daemon") => {
+            if pargs.contains("--verbose") {
+                daemon::VERBOSE.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             if pargs.contains("--restart") {
                 // kill existing daemon if running
                 let path = daemon::socket_path();
@@ -540,6 +546,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         apps: Vec::new(),
         outputs: Vec::new(),
         seats: Vec::new(),
+        daemon_state: None,
     };
     let _registry = conn.display().get_registry(&qh, ());
 
@@ -914,10 +921,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
             };
 
-            // find the focused app
-            let Some(app) = state.apps.iter().find(|a| a.state.contains(&State::Activated)) else {
+            // log all apps and their state for debugging
+            let logfile = std::path::Path::new("/home/x/Archive/repos/cos-cli/debug.log");
+            let mut log = fs::read_to_string(logfile).unwrap_or_default();
+            log.push_str(&format!("[move-to] target_ws={}\n", workspace_name));
+
+            for (i, a) in state.apps.iter().enumerate() {
+                let states = a.state.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",");
+                log.push_str(&format!("  app[{}] app_id={} state=[{}] title={}\n", i, a.app_id.as_deref().unwrap_or("?"), states, a.title.as_deref().unwrap_or("?")));
+            }
+
+            // try daemon for accurate focused window (uses activation timestamps + workspace check)
+            let focused = daemon::send_command("focused").ok().and_then(|r| {
+                if r == "none" { return None; }
+                let parts: Vec<&str> = r.splitn(2, '|').collect();
+                if parts.len() == 2 { Some((parts[0].to_string(), parts[1].to_string())) } else { None }
+            });
+
+            let app = if let Some((ref aid, ref title)) = focused {
+                log.push_str(&format!("  daemon focused: app_id={} title={}\n", aid, title));
+                state.apps.iter().find(|a| a.app_id.as_deref() == Some(aid.as_str()) && a.title.as_deref() == Some(title.as_str()))
+            } else {
+                log.push_str("  daemon not available, falling back to wayland state\n");
+                state.apps.iter().find(|a| a.state.contains(&State::Activated))
+            };
+
+            let Some(app) = app else {
+                log.push_str("  FAIL: no focused app found\n");
+                let _ = fs::write(logfile, &log);
                 return Err(CliError::new("no focused app found.".into()));
             };
+
+            log.push_str(&format!("  moving: app_id={} title={}\n", app.app_id.as_deref().unwrap_or("?"), app.title.as_deref().unwrap_or("?")));
+            let _ = fs::write(logfile, &log);
 
             // find the target workspace
             let Some(ws) = state.workspace_group.iter().flat_map(|v| v.iter()).find(|ws| ws.name == workspace_name) else {
@@ -948,8 +984,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
             };
 
-            // find the focused app
-            let Some((_, app)) = state.apps.iter().enumerate().find(|(_, a)| a.state.contains(&State::Activated)) else {
+            // find the focused app via daemon or wayland state
+            let focused = daemon::send_command("focused").ok().and_then(|r| {
+                if r == "none" { return None; }
+                let parts: Vec<&str> = r.splitn(2, '|').collect();
+                if parts.len() == 2 { Some((parts[0].to_string(), parts[1].to_string())) } else { None }
+            });
+
+            let app = if let Some((ref aid, ref title)) = focused {
+                state.apps.iter().find(|a| a.app_id.as_deref() == Some(aid.as_str()) && a.title.as_deref() == Some(title.as_str()))
+            } else {
+                state.apps.iter().find(|a| a.state.contains(&State::Activated))
+            };
+
+            let Some(app) = app else {
                 return Err(CliError::new("no focused app found.".into()));
             };
 

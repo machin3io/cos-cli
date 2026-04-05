@@ -1,21 +1,28 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use wayland_client::Connection;
+use wayland_client::{Connection, Proxy};
 
 use crate::{AppState, State};
 
 
-// persistent state tracked by the daemon
+pub static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+fn verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed)
+}
+
+
+// persistent state tracked by the daemon, keyed on wayland handle object ID
 pub struct DaemonState {
     pub active_workspace: String,
-    pub windows: HashMap<u32, WindowInfo>,
-    next_window_id: u32,
+    pub windows: HashMap<String, WindowInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +32,7 @@ pub struct WindowInfo {
     pub workspace: String,
     pub state: Vec<String>,
     pub minimized_at: Option<u64>,
+    pub activated_at: Option<u64>,
 }
 
 impl DaemonState {
@@ -32,32 +40,95 @@ impl DaemonState {
         Self {
             active_workspace: "1".to_string(),
             windows: HashMap::new(),
-            next_window_id: 0,
         }
     }
 
-    pub fn add_window(&mut self, app_id: &str, title: &str, workspace: &str) -> u32 {
-        let id = self.next_window_id;
-        self.next_window_id += 1;
 
-        self.windows.insert(id, WindowInfo {
-            app_id: app_id.to_string(),
-            title: title.to_string(),
-            workspace: workspace.to_string(),
+    // called from dispatch when a new toplevel appears
+    pub fn on_window_created(&mut self, handle_id: &str) {
+        let ws = self.active_workspace.clone();
+        if verbose() { println!("new window: {} on workspace {}", handle_id, ws); }
+
+        self.windows.insert(handle_id.to_string(), WindowInfo {
+            app_id: String::new(),
+            title: String::new(),
+            workspace: ws,
             state: Vec::new(),
             minimized_at: None,
+            activated_at: None,
         });
-
-        id
     }
 
-    pub fn remove_window(&mut self, id: u32) {
-        self.windows.remove(&id);
+
+    // called from dispatch when a toplevel's title changes
+    pub fn on_title_changed(&mut self, handle_id: &str, title: &str) {
+        if let Some(w) = self.windows.get_mut(handle_id) {
+            w.title = title.to_string();
+        }
     }
+
+
+    // called from dispatch when a toplevel's app_id changes
+    pub fn on_app_id_changed(&mut self, handle_id: &str, app_id: &str) {
+        if let Some(w) = self.windows.get_mut(handle_id) {
+            w.app_id = app_id.to_string();
+        }
+    }
+
+
+    // called from dispatch when a toplevel's state changes
+    pub fn on_state_changed(&mut self, handle_id: &str, states: &[State]) {
+        if let Some(w) = self.windows.get_mut(handle_id) {
+            let new_states: Vec<String> = states.iter().map(|s| s.to_string()).collect();
+
+            let was_minimized = w.state.contains(&"minimized".to_string());
+            let is_minimized = new_states.contains(&"minimized".to_string());
+            let was_activated = w.state.contains(&"activated".to_string());
+            let is_activated = new_states.contains(&"activated".to_string());
+
+            w.state = new_states;
+
+            // track activation timestamp
+            if is_activated && !was_activated {
+                w.activated_at = Some(now_millis());
+                if verbose() { println!("  focus: {} '{}' on workspace {}", w.app_id, w.title, w.workspace); }
+            } else if !is_activated && was_activated {
+                w.activated_at = None;
+            }
+
+            // track minimize timestamp
+            if is_minimized && !was_minimized {
+                w.minimized_at = Some(now_millis());
+                self.write_minimize_statefile();
+            } else if !is_minimized && was_minimized {
+                w.minimized_at = None;
+                self.write_minimize_statefile();
+            }
+        }
+    }
+
+
+    // called from dispatch when a toplevel is closed
+    pub fn on_window_closed(&mut self, handle_id: &str) {
+        if let Some(w) = self.windows.remove(handle_id) {
+            if verbose() { println!("window closed: {} '{}'", w.app_id, w.title); }
+        }
+    }
+
+
+    // called from dispatch when workspace active state changes
+    pub fn on_workspace_changed(&mut self, name: &str) {
+        if name != self.active_workspace {
+            if verbose() { println!("workspace changed: {} -> {}", self.active_workspace, name); }
+            self.active_workspace = name.to_string();
+        }
+    }
+
 
     pub fn windows_on_workspace(&self, workspace: &str) -> Vec<&WindowInfo> {
         self.windows.values().filter(|w| w.workspace == workspace).collect()
     }
+
 
     pub fn visible_windows_on_workspace(&self, workspace: &str) -> Vec<&WindowInfo> {
         self.windows.values().filter(|w| {
@@ -65,11 +136,26 @@ impl DaemonState {
         }).collect()
     }
 
-    pub fn last_minimized_on_workspace(&self, workspace: &str) -> Option<(&u32, &WindowInfo)> {
+
+    pub fn focused_window(&self) -> Option<(&String, &WindowInfo)> {
+        // the focused window must be activated and on the active workspace
+        // if multiple are activated, pick the most recently activated one
+        self.windows.iter()
+            .filter(|(_, w)| {
+                w.workspace == self.active_workspace
+                    && w.state.contains(&"activated".to_string())
+                    && w.activated_at.is_some()
+            })
+            .max_by_key(|(_, w)| w.activated_at.unwrap())
+    }
+
+
+    pub fn last_minimized_on_workspace(&self, workspace: &str) -> Option<(&String, &WindowInfo)> {
         self.windows.iter()
             .filter(|(_, w)| w.workspace == workspace && w.state.contains(&"minimized".to_string()) && w.minimized_at.is_some())
             .max_by_key(|(_, w)| w.minimized_at.unwrap())
     }
+
 
     pub fn write_minimize_statefile(&self) {
         let path = Path::new("/tmp/cos-cli-minimized");
@@ -91,9 +177,15 @@ impl DaemonState {
 }
 
 
-fn now_millis() -> u64 {
+pub fn now_millis() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+}
+
+
+// extract a stable string ID from a wayland handle for use as a HashMap key
+pub fn handle_id(handle: &cosmic_protocols::toplevel_info::v1::client::zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1) -> String {
+    format!("{:?}", handle.id())
 }
 
 
@@ -110,7 +202,6 @@ pub fn daemon_running() -> bool {
         return false;
     }
 
-    // try to connect to check if daemon is alive
     match UnixStream::connect(&path) {
         Ok(mut stream) => {
             let _ = stream.write_all(b"ping\n");
@@ -126,7 +217,6 @@ pub fn daemon_running() -> bool {
             }
         }
         Err(_) => {
-            // stale socket, clean up
             let _ = fs::remove_file(&path);
             false
         }
@@ -135,8 +225,6 @@ pub fn daemon_running() -> bool {
 
 
 pub fn send_command(cmd: &str) -> Result<String, String> {
-    use std::io::Read;
-
     let path = socket_path();
 
     let mut stream = UnixStream::connect(&path).map_err(|e| format!("failed to connect to daemon: {}", e))?;
@@ -145,7 +233,6 @@ pub fn send_command(cmd: &str) -> Result<String, String> {
     stream.write_all(b"\n").map_err(|e| format!("failed to send newline: {}", e))?;
     stream.flush().map_err(|e| format!("failed to flush: {}", e))?;
 
-    // shut down the write end so the server knows we're done
     stream.shutdown(std::net::Shutdown::Write).map_err(|e| format!("failed to shutdown write: {}", e))?;
 
     let mut response = String::new();
@@ -197,6 +284,7 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
         apps: Vec::new(),
         outputs: Vec::new(),
         seats: Vec::new(),
+        daemon_state: Some(Arc::clone(&state)),
     };
 
     let _registry = conn.display().get_registry(&qh, ());
@@ -205,141 +293,19 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
     event_queue.roundtrip(&mut wl_state)?;
     event_queue.roundtrip(&mut wl_state)?;
 
-    // populate daemon state from initial wayland state
+    // log initial state
     {
-        let mut ds = state.lock().unwrap();
-
-        // find active workspace
-        for group in &wl_state.workspace_group {
-            for ws in group {
-                if ws.active {
-                    ds.active_workspace = ws.name.clone();
-                }
-            }
-        }
-
-        // register all existing windows on the active workspace (best guess)
-        for app in &wl_state.apps {
-            let app_id = app.app_id.as_deref().unwrap_or("unknown");
-            let title = app.title.as_deref().unwrap_or("");
-            let ws = &ds.active_workspace.clone();
-
-            let id = ds.add_window(app_id, title, ws);
-
-            let states: Vec<String> = app.state.iter().map(|s| s.to_string()).collect();
-            if let Some(w) = ds.windows.get_mut(&id) {
-                w.state = states;
-            }
-        }
-
+        let ds = state.lock().unwrap();
         println!("initial state: {} windows on workspace {}", ds.windows.len(), ds.active_workspace);
     }
 
-    // main event loop — track changes, don't rebuild
+    // NOTE: the event loop is now minimal — all window tracking happens in the dispatch
+    // ####: handlers (dispatch.rs) which write directly to DaemonState via the Arc<Mutex<>>
+    // ####: we only need to keep the event loop alive
     println!("entering event loop...");
-
-    // keep a snapshot of known app_id+title combos to detect new/removed windows
-    let mut known_keys: Vec<(String, String)> = wl_state.apps.iter().map(|a| {
-        (a.app_id.as_deref().unwrap_or("unknown").to_string(), a.title.as_deref().unwrap_or("").to_string())
-    }).collect();
 
     loop {
         event_queue.blocking_dispatch(&mut wl_state)?;
-
-        let mut ds = state.lock().unwrap();
-
-        // sync workspace state from wayland
-        for group in &wl_state.workspace_group {
-            for ws in group {
-                if ws.active && ws.name != ds.active_workspace {
-                    println!("workspace changed: {} -> {}", ds.active_workspace, ws.name);
-                    ds.active_workspace = ws.name.clone();
-                }
-            }
-        }
-
-        let mut minimize_changed = false;
-
-        // build current app keys
-        let current_keys: Vec<(String, String)> = wl_state.apps.iter().map(|a| {
-            (a.app_id.as_deref().unwrap_or("unknown").to_string(), a.title.as_deref().unwrap_or("").to_string())
-        }).collect();
-
-        // detect new windows — assign to active workspace
-        for (app_id, title) in &current_keys {
-            if !known_keys.contains(&(app_id.clone(), title.clone())) {
-                let ws = ds.active_workspace.clone();
-                println!("new window: {} '{}' on workspace {}", app_id, title, ws);
-                ds.add_window(app_id, title, &ws);
-            }
-        }
-
-        // detect removed windows
-        let removed: Vec<u32> = ds.windows.iter()
-            .filter(|(_, w)| !current_keys.contains(&(w.app_id.clone(), w.title.clone())))
-            .map(|(id, _)| *id)
-            .collect();
-
-        for id in &removed {
-            if let Some(w) = ds.windows.get(id) {
-                println!("window removed: {} '{}'", w.app_id, w.title);
-            }
-            ds.windows.remove(id);
-        }
-
-        // update state (minimized, activated, etc.) on existing windows
-        let active_ws = ds.active_workspace.clone();
-
-        for app in &wl_state.apps {
-            let app_id = app.app_id.as_deref().unwrap_or("unknown");
-            let title = app.title.as_deref().unwrap_or("");
-            let states: Vec<String> = app.state.iter().map(|s| s.to_string()).collect();
-
-            if let Some(w) = ds.windows.values_mut().find(|w| w.app_id == app_id && w.title == title) {
-                let old_state = w.state.clone();
-                let was_minimized = old_state.contains(&"minimized".to_string());
-                let is_minimized = states.contains(&"minimized".to_string());
-
-                w.state = states.clone();
-
-                // track minimize timestamp
-                if is_minimized && !was_minimized {
-                    w.minimized_at = Some(now_millis());
-                    minimize_changed = true;
-                } else if !is_minimized && was_minimized {
-                    w.minimized_at = None;
-                    minimize_changed = true;
-                }
-
-                // if the app became activated and is on a different workspace, update it
-                if states.contains(&"activated".to_string()) && w.workspace != active_ws {
-                    println!("  activated: {} '{}' moved {} -> {}", app_id, title, w.workspace, active_ws);
-                    w.workspace = active_ws.clone();
-                }
-            }
-        }
-
-        // update title changes on existing windows
-        for app in &wl_state.apps {
-            let app_id = app.app_id.as_deref().unwrap_or("unknown");
-            let title = app.title.as_deref().unwrap_or("");
-
-            // find a window with this app_id whose title changed
-            let has_existing = ds.windows.values().any(|w| w.app_id == app_id && w.title == title);
-
-            if !has_existing {
-                if let Some(w) = ds.windows.values_mut().find(|w| w.app_id == app_id && w.title != title) {
-                    w.title = title.to_string();
-                }
-            }
-        }
-
-        // sync minimize statefile when state changes
-        if minimize_changed {
-            ds.write_minimize_statefile();
-        }
-
-        known_keys = current_keys;
     }
 }
 
@@ -401,7 +367,6 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 drop(ds);
                 let mut ds = state.lock().unwrap();
 
-                // find the first window with this app_id and update its workspace
                 if let Some(w) = ds.windows.values_mut().find(|w| w.app_id == app_id) {
                     w.workspace = target_ws.to_string();
                     "ok".to_string()
@@ -414,7 +379,6 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
         }
 
         "info" => {
-            // return full state as simple text
             let mut out = format!("workspace:{}\n", ds.active_workspace);
 
             for (id, w) in &ds.windows {
@@ -422,6 +386,14 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             out
+        }
+
+        "focused" => {
+            if let Some((_, w)) = ds.focused_window() {
+                format!("{}|{}", w.app_id, w.title)
+            } else {
+                "none".to_string()
+            }
         }
 
         cmd if cmd.starts_with("last-minimized ") => {

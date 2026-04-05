@@ -13,6 +13,7 @@ use wayland_protocols::ext::workspace::v1::client::{
 };
 
 use crate::{App, AppState, State, Workspace};
+use crate::daemon;
 
 impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
     fn event(
@@ -64,23 +65,6 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
                         ),
                     );
                 }
-
-                // "zcosmic_workspace_manager_v2" => {
-                //     proxy.bind::<zcosmic_workspace_manager_v2::ZcosmicWorkspaceManagerV2, _, _>(
-                //         name,
-                //         version,
-                //         qh,
-                //         (),
-                //     );
-                // }
-                // "zcosmic_workspace_handle_v2" => {
-                //     proxy.bind::<zcosmic_workspace_handle_v2::ZcosmicWorkspaceHandleV2, _, _>(
-                //         name,
-                //         version,
-                //         qh,
-                //         (),
-                //     );
-                // }
                 _ => {}
             }
         }
@@ -117,7 +101,6 @@ impl Dispatch<wl_seat::WlSeat, ()> for AppState {
     }
 }
 
-// Implement Dispatch for the workspace manager to handle events like 'Workspace created'
 impl Dispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, ()> for AppState {
     fn event(
         state: &mut Self,
@@ -170,6 +153,15 @@ impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for AppState {
                 for group in state.workspace_group.iter_mut() {
                     if let Some(ws) = group.iter_mut().find(|w| w.handle == *proxy) {
                         ws.active = is_active;
+
+                        // notify daemon of workspace change
+                        if is_active {
+                            if let Some(ref ds) = state.daemon_state {
+                                if let Ok(mut ds) = ds.lock() {
+                                    ds.on_workspace_changed(&ws.name);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -212,6 +204,14 @@ impl Dispatch<zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1, ()> for AppState 
         _: &QueueHandle<AppState>,
     ) {
         if let zcosmic_toplevel_info_v1::Event::Toplevel { toplevel } = event {
+
+            // notify daemon of new window
+            if let Some(ref ds) = app_data.daemon_state {
+                if let Ok(mut ds) = ds.lock() {
+                    ds.on_window_created(&daemon::handle_id(&toplevel));
+                }
+            }
+
             app_data.apps.push(App {
                 handle: toplevel,
                 title: None,
@@ -243,12 +243,26 @@ impl Dispatch<zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1, ()> for AppSt
         match event {
             zcosmic_toplevel_handle_v1::Event::Title { title } => {
                 if let Some(info) = app_data.apps.iter_mut().find(|t| &t.handle == toplevel) {
-                    info.title = Some(title);
+                    info.title = Some(title.clone());
+                }
+
+                // notify daemon
+                if let Some(ref ds) = app_data.daemon_state {
+                    if let Ok(mut ds) = ds.lock() {
+                        ds.on_title_changed(&daemon::handle_id(toplevel), &title);
+                    }
                 }
             }
             zcosmic_toplevel_handle_v1::Event::AppId { app_id } => {
                 if let Some(info) = app_data.apps.iter_mut().find(|t| &t.handle == toplevel) {
-                    info.app_id = Some(app_id);
+                    info.app_id = Some(app_id.clone());
+                }
+
+                // notify daemon
+                if let Some(ref ds) = app_data.daemon_state {
+                    if let Ok(mut ds) = ds.lock() {
+                        ds.on_app_id_changed(&daemon::handle_id(toplevel), &app_id);
+                    }
                 }
             }
             zcosmic_toplevel_handle_v1::Event::OutputEnter { output } => {
@@ -256,26 +270,35 @@ impl Dispatch<zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1, ()> for AppSt
                     info.outputs.push(output);
                 }
             }
-            // zcosmic_toplevel_handle_v1::Event::OutputLeave { output } => {
-            //     if let Some(info) = app_data
-            //         .toplevels
-            //         .iter_mut()
-            //         .find(|t| &t.handle == toplevel)
-            //     {
-            //         info.outputs.retain(|o| o != &output);
-            //     }
-            // }
             zcosmic_toplevel_handle_v1::Event::State { state } => {
+                let parsed_states: Vec<State> = state
+                    .chunks_exact(4)
+                    .map(|chunk| u32::from_ne_bytes(chunk.try_into().unwrap()))
+                    .flat_map(|val| State::try_from(val).ok())
+                    .collect();
+
                 if let Some(info) = app_data.apps.iter_mut().find(|t| &t.handle == toplevel) {
-                    info.state = state
-                        .chunks_exact(4)
-                        .map(|chunk| u32::from_ne_bytes(chunk.try_into().unwrap()))
-                        .flat_map(|val| State::try_from(val).ok())
-                        .collect::<Vec<_>>();
+                    info.state = parsed_states.clone();
                 }
+
+                // notify daemon
+                if let Some(ref ds) = app_data.daemon_state {
+                    if let Ok(mut ds) = ds.lock() {
+                        ds.on_state_changed(&daemon::handle_id(toplevel), &parsed_states);
+                    }
+                }
+            }
+            zcosmic_toplevel_handle_v1::Event::Closed => {
+                // notify daemon before removing
+                if let Some(ref ds) = app_data.daemon_state {
+                    if let Ok(mut ds) = ds.lock() {
+                        ds.on_window_closed(&daemon::handle_id(toplevel));
+                    }
+                }
+
+                app_data.apps.retain(|a| &a.handle != toplevel);
             }
             _ => {}
         }
     }
 }
-

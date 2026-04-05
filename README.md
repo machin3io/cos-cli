@@ -250,12 +250,20 @@ cos-cli state -i 1 --unminimize
 Start the background daemon for persistent window/workspace tracking.
 ````console
 cos-cli daemon
+cos-cli daemon --verbose
 cos-cli daemon --restart
 ````
+Arguments:
+*   `--verbose`
+    Log window events, focus changes, and workspace switches to stdout
+*   `--restart`
+    Kill the existing daemon before starting a new one
 
-The daemon maintains a persistent Wayland connection and tracks all windows — which workspace they're on, their state (minimized, activated, etc.), and title changes. It listens on `$XDG_RUNTIME_DIR/cos-cli.sock` for IPC queries from other cos-cli commands.
+The daemon maintains a persistent Wayland connection and tracks all windows using unique Wayland handle IDs — which workspace they're on, their state (minimized, activated, etc.), title, and focus history. It listens on `$XDG_RUNTIME_DIR/cos-cli.sock` for IPC queries from other cos-cli commands.
 
-Windows are assigned to the workspace that was active when they appeared or became focused. The `move-to` command notifies the daemon when a window is moved. This enables features like `--skip-empty` that need per-workspace window counts.
+Each window is identified by its Wayland protocol object ID, which is stable for the lifetime of the daemon. This avoids the ambiguity of matching by app_id or title, which are not unique (e.g. multiple terminal windows). Windows are assigned to the workspace that was active when they first appeared. Focus is tracked with activation timestamps, so when multiple windows report as activated (a COSMIC quirk), the most recently focused one on the active workspace is used.
+
+Commands like `move-to`, `minimize`, and `unminimize` query the daemon for the focused window when it's running, falling back to direct Wayland state when it's not.
 
 #### `query`
 Query the daemon's tracked state.
@@ -263,7 +271,9 @@ Query the daemon's tracked state.
 cos-cli query                    # full state (windows + active workspace)
 cos-cli query ping               # check if daemon is alive
 cos-cli query active-workspace   # current workspace name
+cos-cli query focused            # currently focused window (app_id|title)
 cos-cli query visible-on 3       # count of visible (non-minimized) windows on workspace 3
 cos-cli query windows-on 5       # list all windows on workspace 5
+cos-cli query last-minimized 1   # most recently minimized window on workspace 1
 cos-cli query shutdown           # stop the daemon
 ````
