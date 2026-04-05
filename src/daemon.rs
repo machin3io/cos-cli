@@ -72,6 +72,7 @@ pub struct WindowInfo {
     pub state: Vec<String>,
     pub minimized_at: Option<u64>,
     pub activated_at: Option<u64>,
+    pub auto_maximized: bool,
 }
 
 impl DaemonState {
@@ -106,6 +107,7 @@ impl DaemonState {
             state: Vec::new(),
             minimized_at: None,
             activated_at: None,
+            auto_maximized: false,
         });
 
         self.queue_auto_maximize(ws);
@@ -160,9 +162,7 @@ impl DaemonState {
             }
         }
 
-        // write statefile and queue auto-maximize outside the borrow
         if let Some(ws) = auto_maximize_ws {
-            self.write_minimize_statefile();
             self.queue_auto_maximize(ws);
         }
     }
@@ -228,24 +228,6 @@ impl DaemonState {
             .max_by_key(|(_, w)| w.minimized_at.unwrap())
     }
 
-
-    pub fn write_minimize_statefile(&self) {
-        let path = Path::new("/tmp/cos-cli-minimized");
-        let mut content = String::new();
-
-        // collect all minimized windows, sorted by timestamp
-        let mut minimized: Vec<&WindowInfo> = self.windows.values()
-            .filter(|w| w.state.contains(&"minimized".to_string()) && w.minimized_at.is_some())
-            .collect();
-
-        minimized.sort_by_key(|w| w.minimized_at.unwrap());
-
-        for w in minimized {
-            content.push_str(&format!("{}:{}:{}:{}\n", w.workspace, w.minimized_at.unwrap(), w.app_id, w.title));
-        }
-
-        let _ = fs::write(path, content);
-    }
 }
 
 
@@ -429,6 +411,10 @@ fn process_auto_maximize(
     conn: &Connection,
     workspace: &str,
 ) {
+    if !crate::is_auto_maximize_enabled() {
+        return;
+    }
+
     let ds = daemon_state.lock().unwrap();
 
     let (_, outer) = crate::get_gaps_for_workspace(workspace);
@@ -442,7 +428,7 @@ fn process_auto_maximize(
         .collect();
 
     if visible.len() == 1 {
-        // sole visible window on zero-gap workspace — maximize it
+        // sole visible window on zero-gap workspace — auto-maximize it
         let hid = visible[0].0.clone();
         let app_id = visible[0].1.app_id.clone();
         let title = visible[0].1.title.clone();
@@ -454,28 +440,42 @@ fn process_auto_maximize(
                     daemon_log(&format!("  auto-maximize: {} '{}' on workspace {}", app_id, title, workspace));
                     manager.set_maximized(&app.handle);
                     conn.flush().ok();
+
+                    // mark as auto-maximized so we only undo our own maximization
+                    let mut ds = daemon_state.lock().unwrap();
+                    if let Some(w) = ds.windows.get_mut(&hid) {
+                        w.auto_maximized = true;
+                    }
                 }
             }
         }
 
     } else if visible.len() > 1 {
-        // multiple visible windows — unmaximize any that were auto-maximized
-        let maximized: Vec<(String, String, String)> = visible.iter()
-            .filter(|(_, w)| w.state.contains(&"maximized".to_string()))
+        // multiple visible windows — only unmaximize those we auto-maximized
+        let auto_maximized: Vec<(String, String, String)> = visible.iter()
+            .filter(|(_, w)| w.auto_maximized)
             .map(|(id, w)| (id.to_string(), w.app_id.clone(), w.title.clone()))
             .collect();
 
         drop(ds);
 
-        if !maximized.is_empty() {
+        if !auto_maximized.is_empty() {
             if let Some(manager) = &wl_state.cosmic_toplevel_manager {
-                for (hid, app_id, title) in &maximized {
+                for (hid, app_id, title) in &auto_maximized {
                     if let Some(app) = wl_state.apps.iter().find(|a| handle_id(&a.handle) == *hid) {
                         daemon_log(&format!("  auto-unmaximize: {} '{}' on workspace {}", app_id, title, workspace));
                         manager.unset_maximized(&app.handle);
                     }
                 }
                 conn.flush().ok();
+            }
+
+            // clear the flag
+            let mut ds = daemon_state.lock().unwrap();
+            for (hid, _, _) in &auto_maximized {
+                if let Some(w) = ds.windows.get_mut(hid) {
+                    w.auto_maximized = false;
+                }
             }
         }
     }

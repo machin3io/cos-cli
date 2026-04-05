@@ -903,7 +903,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             conn.flush()?;
 
             // apply per-workspace gaps
+            let (_, outer) = get_gaps_for_workspace(&target_name);
             apply_gaps(&target_name);
+            let _ = daemon::send_command(&format!("log gap applied: workspace {} ({})", target_name, outer));
 
             // auto-maximize via daemon (daemon has correct handle IDs)
             let _ = daemon::send_command(&format!("auto-maximize {}", target_name));
@@ -921,10 +923,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|ws| ws.name.clone())
                 .unwrap_or_else(|| "1".to_string());
 
-            // check gap before and after adjustment
             let (_, old_outer) = get_gaps_for_workspace(&current_ws);
             adjust_gaps(&current_ws, delta);
             let (_, new_outer) = get_gaps_for_workspace(&current_ws);
+
+            let _ = daemon::send_command(&format!("log gap changed: workspace {} ({} -> {})", current_ws, old_outer, new_outer));
 
             // auto-maximize when gap hits zero
             if new_outer == 0 && old_outer != 0 {
@@ -1045,6 +1048,7 @@ fn json_escape(s: &str) -> String {
 const GAPS_CONFIG: &str = ".config/cosmic/cos-cli/gaps";
 const COSMIC_GAPS: &str = ".config/cosmic/com.system76.CosmicTheme.Dark/v1/gaps";
 const DEFAULT_GAP: (u32, u32) = (0, 30);
+const AUTO_MAXIMIZE_CONFIG: &str = ".config/cosmic/cos-cli/auto_maximize";
 
 
 fn gaps_config_path() -> std::path::PathBuf {
@@ -1056,6 +1060,26 @@ fn gaps_config_path() -> std::path::PathBuf {
 fn cosmic_gaps_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/x".to_string());
     Path::new(&home).join(COSMIC_GAPS)
+}
+
+
+pub fn is_auto_maximize_enabled() -> bool {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/x".to_string());
+    let path = Path::new(&home).join(AUTO_MAXIMIZE_CONFIG);
+
+    // create with default true if missing
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&path, "true\n");
+        return true;
+    }
+
+    match fs::read_to_string(&path) {
+        Ok(content) => content.trim() != "false",
+        Err(_) => true,
+    }
 }
 
 

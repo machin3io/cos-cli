@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "cos-cli"
-version = "0.3.1"
+version = "0.3.1-machin3"
 dependencies = [
  "cosmic-protocols",
  "pico-args",
