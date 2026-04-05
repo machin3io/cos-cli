@@ -146,6 +146,18 @@ impl DaemonState {
             if is_activated && !was_activated {
                 w.activated_at = Some(now_millis());
                 daemon_log(&format!("  focus: {} '{}' on workspace {}", w.app_id, w.title, w.workspace));
+
+                // validate: a focused window cannot be minimized
+                if is_minimized {
+                    daemon_log(&format!("  state fix: {} '{}' clearing stale minimized state", w.app_id, w.title));
+                    w.state.retain(|s| s != "minimized");
+                    w.minimized_at = None;
+                }
+
+                // NOTE: workspace validation is not done here — COSMIC sends
+                // ####: activation events for windows on other workspaces (multi-
+                // ####: activation quirk), so we can't reliably infer a window's
+                // ####: workspace from activation alone
             } else if !is_activated && was_activated {
                 w.activated_at = None;
             }
