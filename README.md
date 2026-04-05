@@ -256,6 +256,8 @@ cos-cli daemon --restart
 Arguments:
 *   `--verbose`
     Log window events, focus changes, and workspace switches to stdout
+*   `--log`
+    Write all debug output to `$XDG_RUNTIME_DIR/cos-cli.log` (can be combined with `--verbose`)
 *   `--restart`
     Kill the existing daemon before starting a new one
 
@@ -284,4 +286,11 @@ Start the daemon with `--verbose` to see all window events, focus changes, works
 
 ````console
 cos-cli daemon --verbose
+````
+
+Use `--log` to write the same output to `$XDG_RUNTIME_DIR/cos-cli.log` for later review. Can be used with or without `--verbose`:
+
+````console
+cos-cli daemon --log               # silent terminal, log file only
+cos-cli daemon --verbose --log     # both terminal and log file
 ````

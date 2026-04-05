@@ -13,9 +13,34 @@ use crate::{AppState, State};
 
 
 pub static VERBOSE: AtomicBool = AtomicBool::new(false);
+static LOG_FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 fn verbose() -> bool {
     VERBOSE.load(Ordering::Relaxed)
+}
+
+pub fn set_log_file(path: PathBuf) {
+    if let Ok(mut lf) = LOG_FILE.lock() {
+        // create/clear the log file
+        let _ = fs::write(&path, "");
+        println!("logging to {}", path.display());
+        *lf = Some(path);
+    }
+}
+
+pub fn daemon_log(msg: &str) {
+    if verbose() {
+        println!("{}", msg);
+    }
+
+    if let Ok(lf) = LOG_FILE.lock() {
+        if let Some(ref path) = *lf {
+            let mut content = fs::read_to_string(path).unwrap_or_default();
+            content.push_str(msg);
+            content.push('\n');
+            let _ = fs::write(path, content);
+        }
+    }
 }
 
 
@@ -47,7 +72,7 @@ impl DaemonState {
     // called from dispatch when a new toplevel appears
     pub fn on_window_created(&mut self, handle_id: &str) {
         let ws = self.active_workspace.clone();
-        if verbose() { println!("new window: {} on workspace {}", handle_id, ws); }
+        daemon_log(&format!("new window: {} on workspace {}", handle_id, ws));
 
         self.windows.insert(handle_id.to_string(), WindowInfo {
             app_id: String::new(),
@@ -91,7 +116,7 @@ impl DaemonState {
             // track activation timestamp
             if is_activated && !was_activated {
                 w.activated_at = Some(now_millis());
-                if verbose() { println!("  focus: {} '{}' on workspace {}", w.app_id, w.title, w.workspace); }
+                daemon_log(&format!("  focus: {} '{}' on workspace {}", w.app_id, w.title, w.workspace));
             } else if !is_activated && was_activated {
                 w.activated_at = None;
             }
@@ -111,7 +136,7 @@ impl DaemonState {
     // called from dispatch when a toplevel is closed
     pub fn on_window_closed(&mut self, handle_id: &str) {
         if let Some(w) = self.windows.remove(handle_id) {
-            if verbose() { println!("window closed: {} '{}'", w.app_id, w.title); }
+            daemon_log(&format!("window closed: {} '{}'", w.app_id, w.title));
         }
     }
 
@@ -119,7 +144,7 @@ impl DaemonState {
     // called from dispatch when workspace active state changes
     pub fn on_workspace_changed(&mut self, name: &str) {
         if name != self.active_workspace {
-            if verbose() { println!("workspace changed: {} -> {}", self.active_workspace, name); }
+            daemon_log(&format!("workspace changed: {} -> {}", self.active_workspace, name));
             self.active_workspace = name.to_string();
         }
     }
@@ -407,9 +432,7 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
         }
 
         cmd if cmd.starts_with("log ") => {
-            if verbose() {
-                println!("{}", &cmd[4..]);
-            }
+            daemon_log(&cmd[4..]);
             "ok".to_string()
         }
 

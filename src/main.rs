@@ -106,6 +106,8 @@ Examples:
   cos-cli unminimize
   cos-cli daemon
   cos-cli daemon --verbose
+  cos-cli daemon --log
+  cos-cli daemon --verbose --log
   cos-cli daemon --restart
   cos-cli query
   cos-cli query ping
@@ -496,6 +498,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("daemon") => {
             if pargs.contains("--verbose") {
                 daemon::VERBOSE.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if pargs.contains("--log") {
+                let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+                daemon::set_log_file(std::path::Path::new(&runtime_dir).join("cos-cli.log"));
             }
             if pargs.contains("--restart") {
                 // kill existing daemon if running
