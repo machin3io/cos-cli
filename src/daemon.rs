@@ -44,10 +44,21 @@ pub fn daemon_log(msg: &str) {
 }
 
 
+// actions that the IPC handler queues for the event loop to execute
+#[derive(Debug)]
+pub enum PendingAction {
+    Maximize(String),         // handle_id
+    Unmaximize(String),       // handle_id
+    AutoMaximize(String),     // workspace name
+    UnmaximizeAll(String),    // workspace name
+}
+
+
 // persistent state tracked by the daemon, keyed on wayland handle object ID
 pub struct DaemonState {
     pub active_workspace: String,
     pub windows: HashMap<String, WindowInfo>,
+    pub pending_actions: Vec<PendingAction>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +76,17 @@ impl DaemonState {
         Self {
             active_workspace: "1".to_string(),
             windows: HashMap::new(),
+            pending_actions: Vec::new(),
+        }
+    }
+
+
+    fn queue_auto_maximize(&mut self, workspace: String) {
+        // deduplicate — don't queue if one is already pending for this workspace
+        let already_pending = self.pending_actions.iter().any(|a| matches!(a, PendingAction::AutoMaximize(ws) if ws == &workspace));
+
+        if !already_pending {
+            self.pending_actions.push(PendingAction::AutoMaximize(workspace));
         }
     }
 
@@ -77,11 +99,13 @@ impl DaemonState {
         self.windows.insert(handle_id.to_string(), WindowInfo {
             app_id: String::new(),
             title: String::new(),
-            workspace: ws,
+            workspace: ws.clone(),
             state: Vec::new(),
             minimized_at: None,
             activated_at: None,
         });
+
+        self.queue_auto_maximize(ws);
     }
 
 
@@ -103,6 +127,8 @@ impl DaemonState {
 
     // called from dispatch when a toplevel's state changes
     pub fn on_state_changed(&mut self, handle_id: &str, states: &[State]) {
+        let mut auto_maximize_ws: Option<String> = None;
+
         if let Some(w) = self.windows.get_mut(handle_id) {
             let new_states: Vec<String> = states.iter().map(|s| s.to_string()).collect();
 
@@ -124,11 +150,17 @@ impl DaemonState {
             // track minimize timestamp
             if is_minimized && !was_minimized {
                 w.minimized_at = Some(now_millis());
-                self.write_minimize_statefile();
+                auto_maximize_ws = Some(w.workspace.clone());
             } else if !is_minimized && was_minimized {
                 w.minimized_at = None;
-                self.write_minimize_statefile();
+                auto_maximize_ws = Some(w.workspace.clone());
             }
+        }
+
+        // write statefile and queue auto-maximize outside the borrow
+        if let Some(ws) = auto_maximize_ws {
+            self.write_minimize_statefile();
+            self.queue_auto_maximize(ws);
         }
     }
 
@@ -137,6 +169,9 @@ impl DaemonState {
     pub fn on_window_closed(&mut self, handle_id: &str) {
         if let Some(w) = self.windows.remove(handle_id) {
             daemon_log(&format!("window closed: {} '{}'", w.app_id, w.title));
+
+            // check if remaining sole window should be auto-maximized
+            self.pending_actions.push(PendingAction::AutoMaximize(w.workspace));
         }
     }
 
@@ -172,6 +207,15 @@ impl DaemonState {
                     && w.activated_at.is_some()
             })
             .max_by_key(|(_, w)| w.activated_at.unwrap())
+    }
+
+
+    pub fn sole_visible_on_workspace(&self, workspace: &str) -> Option<(&String, &WindowInfo)> {
+        let visible: Vec<(&String, &WindowInfo)> = self.windows.iter()
+            .filter(|(_, w)| w.workspace == workspace && !w.state.contains(&"minimized".to_string()))
+            .collect();
+
+        if visible.len() == 1 { Some((visible[0].0, visible[0].1)) } else { None }
     }
 
 
@@ -324,13 +368,136 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
         println!("initial state: {} windows on workspace {}", ds.windows.len(), ds.active_workspace);
     }
 
-    // NOTE: the event loop is now minimal — all window tracking happens in the dispatch
-    // ####: handlers (dispatch.rs) which write directly to DaemonState via the Arc<Mutex<>>
-    // ####: we only need to keep the event loop alive
+    // NOTE: all window tracking happens in the dispatch handlers (dispatch.rs)
+    // ####: the event loop processes pending actions queued by IPC handlers
     println!("entering event loop...");
 
     loop {
         event_queue.blocking_dispatch(&mut wl_state)?;
+
+        // process pending actions from IPC
+        let actions: Vec<PendingAction> = {
+            let mut ds = state.lock().unwrap();
+            std::mem::take(&mut ds.pending_actions)
+        };
+
+        for action in actions {
+            match action {
+                PendingAction::AutoMaximize(workspace) => {
+                    process_auto_maximize(&state, &wl_state, &conn, &workspace);
+                }
+                PendingAction::UnmaximizeAll(workspace) => {
+                    process_unmaximize_all(&state, &wl_state, &conn, &workspace);
+                }
+                PendingAction::Maximize(hid) => {
+                    if let Some(manager) = &wl_state.cosmic_toplevel_manager {
+                        if let Some(app) = wl_state.apps.iter().find(|a| handle_id(&a.handle) == hid) {
+                            manager.set_maximized(&app.handle);
+                            conn.flush().ok();
+                        }
+                    }
+                }
+                PendingAction::Unmaximize(hid) => {
+                    if let Some(manager) = &wl_state.cosmic_toplevel_manager {
+                        if let Some(app) = wl_state.apps.iter().find(|a| handle_id(&a.handle) == hid) {
+                            manager.unset_maximized(&app.handle);
+                            conn.flush().ok();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+fn process_auto_maximize(
+    daemon_state: &Arc<Mutex<DaemonState>>,
+    wl_state: &crate::AppState,
+    conn: &Connection,
+    workspace: &str,
+) {
+    let ds = daemon_state.lock().unwrap();
+
+    let (_, outer) = crate::get_gaps_for_workspace(workspace);
+
+    if outer != 0 {
+        return;
+    }
+
+    let visible: Vec<(&String, &WindowInfo)> = ds.windows.iter()
+        .filter(|(_, w)| w.workspace == workspace && !w.state.contains(&"minimized".to_string()))
+        .collect();
+
+    if visible.len() == 1 {
+        // sole visible window on zero-gap workspace — maximize it
+        let hid = visible[0].0.clone();
+        let app_id = visible[0].1.app_id.clone();
+        let title = visible[0].1.title.clone();
+        drop(ds);
+
+        if let Some(manager) = &wl_state.cosmic_toplevel_manager {
+            if let Some(app) = wl_state.apps.iter().find(|a| handle_id(&a.handle) == hid) {
+                if !app.state.contains(&crate::State::Maximized) {
+                    daemon_log(&format!("  auto-maximize: {} '{}' on workspace {}", app_id, title, workspace));
+                    manager.set_maximized(&app.handle);
+                    conn.flush().ok();
+                }
+            }
+        }
+
+    } else if visible.len() > 1 {
+        // multiple visible windows — unmaximize any that were auto-maximized
+        let maximized: Vec<(String, String, String)> = visible.iter()
+            .filter(|(_, w)| w.state.contains(&"maximized".to_string()))
+            .map(|(id, w)| (id.to_string(), w.app_id.clone(), w.title.clone()))
+            .collect();
+
+        drop(ds);
+
+        if !maximized.is_empty() {
+            if let Some(manager) = &wl_state.cosmic_toplevel_manager {
+                for (hid, app_id, title) in &maximized {
+                    if let Some(app) = wl_state.apps.iter().find(|a| handle_id(&a.handle) == *hid) {
+                        daemon_log(&format!("  auto-unmaximize: {} '{}' on workspace {}", app_id, title, workspace));
+                        manager.unset_maximized(&app.handle);
+                    }
+                }
+                conn.flush().ok();
+            }
+        }
+    }
+}
+
+
+fn process_unmaximize_all(
+    daemon_state: &Arc<Mutex<DaemonState>>,
+    wl_state: &crate::AppState,
+    conn: &Connection,
+    workspace: &str,
+) {
+    let ds = daemon_state.lock().unwrap();
+
+    // find all maximized windows on the workspace
+    let maximized: Vec<String> = ds.windows.iter()
+        .filter(|(_, w)| w.workspace == workspace && w.state.contains(&"maximized".to_string()))
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    if maximized.is_empty() {
+        return;
+    }
+
+    drop(ds);
+
+    if let Some(manager) = &wl_state.cosmic_toplevel_manager {
+        for hid in &maximized {
+            if let Some(app) = wl_state.apps.iter().find(|a| handle_id(&a.handle) == *hid) {
+                daemon_log(&format!("  auto-unmaximize: {} '{}' on workspace {}", app.app_id.as_deref().unwrap_or("?"), app.title.as_deref().unwrap_or("?"), workspace));
+                manager.unset_maximized(&app.handle);
+            }
+        }
+        conn.flush().ok();
     }
 }
 
@@ -411,6 +578,32 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             out
+        }
+
+        cmd if cmd.starts_with("auto-maximize ") => {
+            let ws = &cmd[14..];
+            drop(ds);
+            let mut ds = state.lock().unwrap();
+            ds.pending_actions.push(PendingAction::AutoMaximize(ws.to_string()));
+            "ok".to_string()
+        }
+
+        cmd if cmd.starts_with("unmaximize-all ") => {
+            let ws = &cmd[15..];
+            drop(ds);
+            let mut ds = state.lock().unwrap();
+            ds.pending_actions.push(PendingAction::UnmaximizeAll(ws.to_string()));
+            "ok".to_string()
+        }
+
+        cmd if cmd.starts_with("sole-window-on ") => {
+            let ws = &cmd[15..];
+
+            if let Some((id, w)) = ds.sole_visible_on_workspace(ws) {
+                format!("{}|{}|{}", id, w.app_id, w.title)
+            } else {
+                "none".to_string()
+            }
         }
 
         "focused" => {

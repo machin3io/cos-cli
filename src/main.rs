@@ -905,6 +905,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // apply per-workspace gaps
             apply_gaps(&target_name);
 
+            // auto-maximize via daemon (daemon has correct handle IDs)
+            let _ = daemon::send_command(&format!("auto-maximize {}", target_name));
+
             // notify daemon of workspace change
             let _ = daemon::send_command(&format!("set-workspace {}", target_name));
         }
@@ -918,7 +921,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|ws| ws.name.clone())
                 .unwrap_or_else(|| "1".to_string());
 
+            // check gap before and after adjustment
+            let (_, old_outer) = get_gaps_for_workspace(&current_ws);
             adjust_gaps(&current_ws, delta);
+            let (_, new_outer) = get_gaps_for_workspace(&current_ws);
+
+            // auto-maximize when gap hits zero
+            if new_outer == 0 && old_outer != 0 {
+                let _ = daemon::send_command(&format!("auto-maximize {}", current_ws));
+            }
+
+            // unmaximize all when gap increases
+            if delta > 0 {
+                let _ = daemon::send_command(&format!("unmaximize-all {}", current_ws));
+            }
         }
         Command::MoveTo(workspace_name) => {
             let Some(manager) = &state.cosmic_toplevel_manager else {
@@ -1178,7 +1194,7 @@ fn read_gaps_config() -> Vec<(String, u32, u32)> {
 }
 
 
-fn get_gaps_for_workspace(workspace: &str) -> (u32, u32) {
+pub fn get_gaps_for_workspace(workspace: &str) -> (u32, u32) {
     let config = read_gaps_config();
 
     // look for exact workspace match first
