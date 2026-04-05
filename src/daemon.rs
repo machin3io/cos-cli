@@ -406,6 +406,13 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
         }
 
+        cmd if cmd.starts_with("log ") => {
+            if verbose() {
+                println!("{}", &cmd[4..]);
+            }
+            "ok".to_string()
+        }
+
         "shutdown" => {
             let _ = writer.write_all(b"bye\n");
             let _ = writer.flush();

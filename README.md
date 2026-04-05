@@ -277,3 +277,11 @@ cos-cli query windows-on 5       # list all windows on workspace 5
 cos-cli query last-minimized 1   # most recently minimized window on workspace 1
 cos-cli query shutdown           # stop the daemon
 ````
+
+#### Debugging
+
+Start the daemon with `--verbose` to see all window events, focus changes, workspace switches, and debug output from commands like `move-to`, `minimize`, and `unminimize` — everything appears in the daemon's terminal output.
+
+````console
+cos-cli daemon --verbose
+````

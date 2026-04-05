@@ -921,14 +921,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
             };
 
-            // log all apps and their state for debugging
-            let logfile = std::path::Path::new("/home/x/Archive/repos/cos-cli/debug.log");
-            let mut log = fs::read_to_string(logfile).unwrap_or_default();
-            log.push_str(&format!("[move-to] target_ws={}\n", workspace_name));
+            debug_log(&format!("[move-to] target_ws={}\n", workspace_name));
 
             for (i, a) in state.apps.iter().enumerate() {
                 let states = a.state.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",");
-                log.push_str(&format!("  app[{}] app_id={} state=[{}] title={}\n", i, a.app_id.as_deref().unwrap_or("?"), states, a.title.as_deref().unwrap_or("?")));
+                debug_log(&format!("  app[{}] app_id={} state=[{}] title={}\n", i, a.app_id.as_deref().unwrap_or("?"), states, a.title.as_deref().unwrap_or("?")));
             }
 
             // try daemon for accurate focused window (uses activation timestamps + workspace check)
@@ -939,21 +936,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
 
             let app = if let Some((ref aid, ref title)) = focused {
-                log.push_str(&format!("  daemon focused: app_id={} title={}\n", aid, title));
+                debug_log(&format!("  daemon focused: app_id={} title={}\n", aid, title));
                 state.apps.iter().find(|a| a.app_id.as_deref() == Some(aid.as_str()) && a.title.as_deref() == Some(title.as_str()))
             } else {
-                log.push_str("  daemon not available, falling back to wayland state\n");
+                debug_log("  daemon not available, falling back to wayland state\n");
                 state.apps.iter().find(|a| a.state.contains(&State::Activated))
             };
 
             let Some(app) = app else {
-                log.push_str("  FAIL: no focused app found\n");
-                let _ = fs::write(logfile, &log);
+                debug_log("  FAIL: no focused app found\n");
                 return Err(CliError::new("no focused app found.".into()));
             };
 
-            log.push_str(&format!("  moving: app_id={} title={}\n", app.app_id.as_deref().unwrap_or("?"), app.title.as_deref().unwrap_or("?")));
-            let _ = fs::write(logfile, &log);
+            debug_log(&format!("  moving: app_id={} title={}\n", app.app_id.as_deref().unwrap_or("?"), app.title.as_deref().unwrap_or("?")));
 
             // find the target workspace
             let Some(ws) = state.workspace_group.iter().flat_map(|v| v.iter()).find(|ws| ws.name == workspace_name) else {
@@ -991,13 +986,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if parts.len() == 2 { Some((parts[0].to_string(), parts[1].to_string())) } else { None }
             });
 
+            debug_log("[minimize]\n");
+
             let app = if let Some((ref aid, ref title)) = focused {
+                debug_log(&format!("  daemon focused: app_id={} title={}\n", aid, title));
                 state.apps.iter().find(|a| a.app_id.as_deref() == Some(aid.as_str()) && a.title.as_deref() == Some(title.as_str()))
             } else {
+                debug_log("  daemon not available, falling back to wayland state\n");
                 state.apps.iter().find(|a| a.state.contains(&State::Activated))
             };
 
             let Some(app) = app else {
+                debug_log("  FAIL: no focused app found\n");
                 return Err(CliError::new("no focused app found.".into()));
             };
 
@@ -1015,6 +1015,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis();
+
+            debug_log(&format!("  minimizing: app_id={} title={} ws={}\n", app.app_id.as_deref().unwrap_or("?"), title, current_ws));
 
             // push to minimize stack: workspace:timestamp:app_id:title
             let entry = format!("{}:{}:{}:{}", current_ws, timestamp, app.app_id.as_deref().unwrap_or("?"), title);
@@ -1042,6 +1044,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .find(|ws| ws.active)
                 .map(|ws| ws.name.clone())
                 .unwrap_or_default();
+
+            debug_log(&format!("[unminimize] ws={}\n", current_ws));
 
             // try daemon first for the most recently minimized window on this workspace
             let (app_id, title) = if let Ok(response) = daemon::send_command(&format!("last-minimized {}", current_ws)) {
@@ -1095,8 +1099,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
 
             let Some(app) = app else {
+                debug_log(&format!("  FAIL: app '{}' not found as minimized\n", app_id));
                 return Err(CliError::new(format!("app '{}' is no longer minimized.", app_id)));
             };
+
+            debug_log(&format!("  unminimizing: app_id={} title={}\n", app.app_id.as_deref().unwrap_or("?"), app.title.as_deref().unwrap_or("?")));
 
             // unminimize the app
             manager.unset_minimized(&app.handle);
@@ -1110,6 +1117,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn json_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+
+fn debug_log(msg: &str) {
+    let _ = daemon::send_command(&format!("log {}", msg.trim_end()));
 }
 
 
