@@ -51,6 +51,9 @@ pub enum PendingAction {
     Unmaximize(String),       // handle_id
     AutoMaximize(String),     // workspace name
     UnmaximizeAll(String),    // workspace name
+    MoveFocusedTo(String),    // target workspace name
+    MinimizeFocused,
+    UnminimizeLast,           // unminimize last minimized on active workspace
 }
 
 
@@ -383,6 +386,15 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
 
         for action in actions {
             match action {
+                PendingAction::MoveFocusedTo(workspace) => {
+                    process_move_focused_to(&state, &wl_state, &conn, &workspace);
+                }
+                PendingAction::MinimizeFocused => {
+                    process_minimize_focused(&state, &wl_state, &conn);
+                }
+                PendingAction::UnminimizeLast => {
+                    process_unminimize_last(&state, &wl_state, &conn);
+                }
                 PendingAction::AutoMaximize(workspace) => {
                     process_auto_maximize(&state, &wl_state, &conn, &workspace);
                 }
@@ -502,6 +514,115 @@ fn process_unmaximize_all(
 }
 
 
+fn process_move_focused_to(
+    daemon_state: &Arc<Mutex<DaemonState>>,
+    wl_state: &crate::AppState,
+    conn: &Connection,
+    target_workspace: &str,
+) {
+    let ds = daemon_state.lock().unwrap();
+
+    // find the focused window (most recently activated on the active workspace)
+    let focused = ds.focused_window().map(|(id, w)| (id.clone(), w.app_id.clone(), w.title.clone()));
+    drop(ds);
+
+    let Some((hid, app_id, title)) = focused else {
+        daemon_log("  move-to: no focused window found");
+        return;
+    };
+
+    let Some(manager) = &wl_state.cosmic_toplevel_manager else { return; };
+
+    // find the app by handle ID
+    let Some(app) = wl_state.apps.iter().find(|a| handle_id(&a.handle) == hid) else {
+        daemon_log(&format!("  move-to: handle not found for {} '{}'", app_id, title));
+        return;
+    };
+
+    // find the target workspace handle
+    let Some(ws) = wl_state.workspace_group.iter().flat_map(|v| v.iter()).find(|ws| ws.name == target_workspace) else {
+        daemon_log(&format!("  move-to: workspace {} not found", target_workspace));
+        return;
+    };
+
+    let output = if wl_state.outputs.is_empty() {
+        daemon_log("  move-to: no outputs found");
+        return;
+    } else {
+        wl_state.outputs[0].0.clone()
+    };
+
+    daemon_log(&format!("  move-to: {} '{}' -> workspace {}", app_id, title, target_workspace));
+    manager.move_to_ext_workspace(&app.handle, &ws.handle, &output);
+    conn.flush().ok();
+
+    // update daemon state
+    let mut ds = daemon_state.lock().unwrap();
+    if let Some(w) = ds.windows.get_mut(&hid) {
+        w.workspace = target_workspace.to_string();
+    }
+}
+
+
+fn process_minimize_focused(
+    daemon_state: &Arc<Mutex<DaemonState>>,
+    wl_state: &crate::AppState,
+    conn: &Connection,
+) {
+    let ds = daemon_state.lock().unwrap();
+
+    let focused = ds.focused_window().map(|(id, w)| (id.clone(), w.app_id.clone(), w.title.clone(), w.workspace.clone()));
+    drop(ds);
+
+    let Some((hid, app_id, title, workspace)) = focused else {
+        daemon_log("  minimize: no focused window found");
+        return;
+    };
+
+    let Some(manager) = &wl_state.cosmic_toplevel_manager else { return; };
+
+    let Some(app) = wl_state.apps.iter().find(|a| handle_id(&a.handle) == hid) else {
+        daemon_log(&format!("  minimize: handle not found for {} '{}'", app_id, title));
+        return;
+    };
+
+    daemon_log(&format!("  minimize: {} '{}' on workspace {}", app_id, title, workspace));
+    manager.set_minimized(&app.handle);
+    conn.flush().ok();
+}
+
+
+fn process_unminimize_last(
+    daemon_state: &Arc<Mutex<DaemonState>>,
+    wl_state: &crate::AppState,
+    conn: &Connection,
+) {
+    let ds = daemon_state.lock().unwrap();
+
+    let active_ws = ds.active_workspace.clone();
+
+    let last = ds.last_minimized_on_workspace(&active_ws)
+        .map(|(id, w)| (id.clone(), w.app_id.clone(), w.title.clone()));
+    drop(ds);
+
+    let Some((hid, app_id, title)) = last else {
+        daemon_log(&format!("  unminimize: no minimized windows on workspace {}", active_ws));
+        return;
+    };
+
+    let Some(manager) = &wl_state.cosmic_toplevel_manager else { return; };
+
+    let Some(app) = wl_state.apps.iter().find(|a| handle_id(&a.handle) == hid) else {
+        daemon_log(&format!("  unminimize: handle not found for {} '{}'", app_id, title));
+        return;
+    };
+
+    daemon_log(&format!("  unminimize: {} '{}' on workspace {}", app_id, title, active_ws));
+    manager.unset_minimized(&app.handle);
+    conn.flush().ok();
+}
+
+
 fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
     let mut reader = BufReader::new(&stream);
     let mut writer = &stream;
@@ -578,6 +699,28 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             out
+        }
+
+        cmd if cmd.starts_with("do-move-to ") => {
+            let ws = &cmd[11..];
+            drop(ds);
+            let mut ds = state.lock().unwrap();
+            ds.pending_actions.push(PendingAction::MoveFocusedTo(ws.to_string()));
+            "ok".to_string()
+        }
+
+        "do-minimize" => {
+            drop(ds);
+            let mut ds = state.lock().unwrap();
+            ds.pending_actions.push(PendingAction::MinimizeFocused);
+            "ok".to_string()
+        }
+
+        "do-unminimize" => {
+            drop(ds);
+            let mut ds = state.lock().unwrap();
+            ds.pending_actions.push(PendingAction::UnminimizeLast);
+            "ok".to_string()
         }
 
         cmd if cmd.starts_with("auto-maximize ") => {

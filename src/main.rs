@@ -937,152 +937,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::MoveTo(workspace_name) => {
-            let Some(manager) = &state.cosmic_toplevel_manager else {
-                return Err(CliError::new(
-                    "Compositor does not support toplevel management protocol.".into(),
-                ));
-            };
-
-            debug_log(&format!("[move-to] target_ws={}\n", workspace_name));
-
-            for (i, a) in state.apps.iter().enumerate() {
-                let states = a.state.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",");
-                debug_log(&format!("  app[{}] app_id={} state=[{}] title={}\n", i, a.app_id.as_deref().unwrap_or("?"), states, a.title.as_deref().unwrap_or("?")));
-            }
-
-            // try daemon for accurate focused window (uses activation timestamps + workspace check)
-            let focused = daemon::send_command("focused").ok().and_then(|r| {
-                if r == "none" { return None; }
-                let parts: Vec<&str> = r.splitn(2, '|').collect();
-                if parts.len() == 2 { Some((parts[0].to_string(), parts[1].to_string())) } else { None }
-            });
-
-            let app = if let Some((ref aid, ref title)) = focused {
-                debug_log(&format!("  daemon focused: app_id={} title={}\n", aid, title));
-                state.apps.iter().find(|a| a.app_id.as_deref() == Some(aid.as_str()) && a.title.as_deref() == Some(title.as_str()))
+            // daemon handles this with correct handle IDs
+            if daemon::send_command(&format!("do-move-to {}", workspace_name)).is_ok() {
+                // daemon handled it
             } else {
-                debug_log("  daemon not available, falling back to wayland state\n");
-                state.apps.iter().find(|a| a.state.contains(&State::Activated))
-            };
+                // fallback: no daemon, use direct wayland
+                let Some(manager) = &state.cosmic_toplevel_manager else {
+                    return Err(CliError::new("Compositor does not support toplevel management protocol.".into()));
+                };
 
-            let Some(app) = app else {
-                debug_log("  FAIL: no focused app found\n");
-                return Err(CliError::new("no focused app found.".into()));
-            };
+                let Some(app) = state.apps.iter().find(|a| a.state.contains(&State::Activated)) else {
+                    return Err(CliError::new("no focused app found.".into()));
+                };
 
-            debug_log(&format!("  moving: app_id={} title={}\n", app.app_id.as_deref().unwrap_or("?"), app.title.as_deref().unwrap_or("?")));
+                let Some(ws) = state.workspace_group.iter().flat_map(|v| v.iter()).find(|ws| ws.name == workspace_name) else {
+                    return Err(CliError::new(format!("Workspace not found: {}", workspace_name)));
+                };
 
-            // find the target workspace
-            let Some(ws) = state.workspace_group.iter().flat_map(|v| v.iter()).find(|ws| ws.name == workspace_name) else {
-                return Err(CliError::new(format!("Workspace not found: {}", workspace_name)));
-            };
+                let output = if state.outputs.is_empty() {
+                    return Err(CliError::new("No outputs found.".to_string()));
+                } else {
+                    state.outputs[0].0.clone()
+                };
 
-            // find the output
-            let output = if state.outputs.is_empty() {
-                return Err(CliError::new("No outputs found.".to_string()));
-            } else {
-                state.outputs[0].0.clone()
-            };
-
-            manager.move_to_ext_workspace(&app.handle, &ws.handle, &output);
-            conn.flush()?;
-
-            // notify daemon of window move
-            if let Some(app_id) = &app.app_id {
-                let _ = daemon::send_command(&format!("move-window {}:{}", app_id, workspace_name));
+                manager.move_to_ext_workspace(&app.handle, &ws.handle, &output);
+                conn.flush()?;
             }
         }
         Command::Minimize => {
-            let minimize_stack = Path::new("/tmp/cos-cli-minimized");
-
-            let Some(manager) = &state.cosmic_toplevel_manager else {
-                return Err(CliError::new(
-                    "Compositor does not support toplevel management protocol.".into(),
-                ));
-            };
-
-            // find the focused app via daemon or wayland state
-            let focused = daemon::send_command("focused").ok().and_then(|r| {
-                if r == "none" { return None; }
-                let parts: Vec<&str> = r.splitn(2, '|').collect();
-                if parts.len() == 2 { Some((parts[0].to_string(), parts[1].to_string())) } else { None }
-            });
-
-            debug_log("[minimize]\n");
-
-            let app = if let Some((ref aid, ref title)) = focused {
-                debug_log(&format!("  daemon focused: app_id={} title={}\n", aid, title));
-                state.apps.iter().find(|a| a.app_id.as_deref() == Some(aid.as_str()) && a.title.as_deref() == Some(title.as_str()))
+            // daemon handles this with correct handle IDs
+            if daemon::send_command("do-minimize").is_ok() {
+                // daemon handled it
             } else {
-                debug_log("  daemon not available, falling back to wayland state\n");
-                state.apps.iter().find(|a| a.state.contains(&State::Activated))
-            };
+                // fallback: no daemon
+                let Some(manager) = &state.cosmic_toplevel_manager else {
+                    return Err(CliError::new("Compositor does not support toplevel management protocol.".into()));
+                };
 
-            let Some(app) = app else {
-                debug_log("  FAIL: no focused app found\n");
-                return Err(CliError::new("no focused app found.".into()));
-            };
+                let Some(app) = state.apps.iter().find(|a| a.state.contains(&State::Activated)) else {
+                    return Err(CliError::new("no focused app found.".into()));
+                };
 
-            // find the current active workspace
-            let current_ws = state
-                .workspace_group
-                .iter()
-                .flat_map(|v| v.iter())
-                .find(|ws| ws.active)
-                .map(|ws| ws.name.as_str())
-                .unwrap_or("?");
-
-            let title = app.title.as_deref().unwrap_or("?");
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-
-            debug_log(&format!("  minimizing: app_id={} title={} ws={}\n", app.app_id.as_deref().unwrap_or("?"), title, current_ws));
-
-            // push to minimize stack: workspace:timestamp:app_id:title
-            let entry = format!("{}:{}:{}:{}", current_ws, timestamp, app.app_id.as_deref().unwrap_or("?"), title);
-            let mut stack = fs::read_to_string(minimize_stack).unwrap_or_default();
-            stack.push_str(&entry);
-            stack.push('\n');
-            let _ = fs::write(minimize_stack, &stack);
-
-            // minimize the app
-            manager.set_minimized(&app.handle);
-            conn.flush()?;
+                manager.set_minimized(&app.handle);
+                conn.flush()?;
+            }
         }
         Command::Unminimize => {
-            let Some(manager) = &state.cosmic_toplevel_manager else {
-                return Err(CliError::new(
-                    "Compositor does not support toplevel management protocol.".into(),
-                ));
-            };
-
-            // find the current active workspace
-            let current_ws = state
-                .workspace_group
-                .iter()
-                .flat_map(|v| v.iter())
-                .find(|ws| ws.active)
-                .map(|ws| ws.name.clone())
-                .unwrap_or_default();
-
-            debug_log(&format!("[unminimize] ws={}\n", current_ws));
-
-            // try daemon first for the most recently minimized window on this workspace
-            let (app_id, title) = if let Ok(response) = daemon::send_command(&format!("last-minimized {}", current_ws)) {
-                if response != "none" {
-                    let parts: Vec<&str> = response.splitn(2, '|').collect();
-                    if parts.len() == 2 {
-                        (parts[0].to_string(), parts[1].to_string())
-                    } else {
-                        return Err(CliError::new(format!("no minimized apps on workspace {}.", current_ws)));
-                    }
-                } else {
-                    return Err(CliError::new(format!("no minimized apps on workspace {}.", current_ws)));
-                }
+            // daemon handles this with correct handle IDs
+            if daemon::send_command("do-unminimize").is_ok() {
+                // daemon handled it
             } else {
-                // daemon not running, fall back to statefile
+                // fallback: no daemon, use statefile + direct wayland
+                let Some(manager) = &state.cosmic_toplevel_manager else {
+                    return Err(CliError::new("Compositor does not support toplevel management protocol.".into()));
+                };
+
+                let current_ws = state.workspace_group.iter().flat_map(|v| v.iter())
+                    .find(|ws| ws.active).map(|ws| ws.name.clone()).unwrap_or_default();
+
                 let minimize_stack = Path::new("/tmp/cos-cli-minimized");
                 let stack_content = fs::read_to_string(minimize_stack).unwrap_or_default();
                 let mut lines: Vec<&str> = stack_content.lines().collect();
@@ -1098,38 +1010,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Err(CliError::new("corrupt minimize stack entry.".into()));
                 }
 
-                let aid = parts[2].to_string();
-                let t = if parts.len() >= 4 { parts[3].to_string() } else { String::new() };
+                let app_id = parts[2];
+                let title = if parts.len() >= 4 { parts[3] } else { "" };
 
-                // remove the entry
+                let app = state.apps.iter().find(|a| {
+                    a.app_id.as_deref() == Some(app_id) && a.state.contains(&State::Minimized)
+                        && (title.is_empty() || a.title.as_deref() == Some(title))
+                });
+
+                let Some(app) = app else {
+                    lines.remove(pos);
+                    let _ = fs::write(minimize_stack, lines.join("\n") + if lines.is_empty() { "" } else { "\n" });
+                    return Err(CliError::new(format!("app '{}' is no longer minimized.", app_id)));
+                };
+
                 lines.remove(pos);
                 let _ = fs::write(minimize_stack, lines.join("\n") + if lines.is_empty() { "" } else { "\n" });
 
-                (aid, t)
-            };
-
-            // find the minimized app matching app_id + title, fall back to app_id only
-            let app = state.apps.iter().find(|a| {
-                a.app_id.as_deref() == Some(&app_id)
-                    && a.state.contains(&State::Minimized)
-                    && !title.is_empty()
-                    && a.title.as_deref() == Some(&title)
-            }).or_else(|| {
-                state.apps.iter().find(|a| {
-                    a.app_id.as_deref() == Some(&app_id) && a.state.contains(&State::Minimized)
-                })
-            });
-
-            let Some(app) = app else {
-                debug_log(&format!("  FAIL: app '{}' not found as minimized\n", app_id));
-                return Err(CliError::new(format!("app '{}' is no longer minimized.", app_id)));
-            };
-
-            debug_log(&format!("  unminimizing: app_id={} title={}\n", app.app_id.as_deref().unwrap_or("?"), app.title.as_deref().unwrap_or("?")));
-
-            // unminimize the app
-            manager.unset_minimized(&app.handle);
-            conn.flush()?;
+                manager.unset_minimized(&app.handle);
+                conn.flush()?;
+            }
         }
         Command::Daemon => unreachable!(),
     };
@@ -1139,11 +1039,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn json_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-
-fn debug_log(msg: &str) {
-    let _ = daemon::send_command(&format!("log {}", msg.trim_end()));
 }
 
 
