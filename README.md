@@ -7,16 +7,21 @@ A CLI tool for managing windows and workspaces on the COSMIC Desktop Environment
 > **Fork note:** This is a `machin3` fork (`workspace_control` branch). The upstream repo is [estin/cos-cli](https://github.com/estin/cos-cli).
 
 ## Features
+
+#### Upstream
 - **List Information**: View active applications, workspaces (with active state), and outputs.
 - **Window Management**: Move applications between workspaces by their App ID.
 - **Activate Application**: Bring a specific application to the foreground.
 - **Window State**: Set window state (maximize, minimize, fullscreen, sticky).
+
+#### Fork
 - **Workspace Switching**: Switch directly to any workspace by name, or cycle with next/prev (with wrapping and optional dynamic workspace exclusion).
 - **Skip-Empty Cycling**: Cycle through only workspaces with visible windows (requires daemon).
 - **Workspace Toggle**: Switch back and forth between the last two workspaces via statefile history.
+- **Move Focused Window**: Move the currently focused app to any workspace.
 - **Minimize/Unminimize**: Minimize the focused app with per-workspace history, unminimize the last minimized app on the current workspace.
 - **Per-Workspace Gaps**: Automatically apply window gap settings per workspace, with keybinds to adjust on the fly.
-- **Daemon Mode**: Persistent background process that tracks windows across workspaces via Wayland events, enabling skip-empty cycling and per-workspace queries.
+- **Daemon Mode**: Persistent background process that tracks windows across workspaces via Wayland handle IDs, enabling accurate focus detection, skip-empty cycling, and per-workspace queries.
 
 ## Installation
 Ensure you have the Rust toolchain installed.
