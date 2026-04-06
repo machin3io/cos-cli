@@ -30,6 +30,7 @@ The daemon (`cos-cli daemon`) is a persistent background process that maintains 
 **With the daemon**, commands like `move-to`, `minimize`, and `unminimize` are executed by the daemon itself using stable handle IDs — no ambiguity when multiple windows share the same app ID or title. The daemon also enables:
 - **Skip-empty cycling** — knows which workspaces have visible windows
 - **Auto-maximize** — automatically maximizes the sole window on zero-gap workspaces, and undoes it when a second window appears
+- **Workspace tracking** — receives `ext_workspace_enter`/`ext_workspace_leave` events from the compositor, so window-to-workspace assignments stay accurate even when windows are moved via native COSMIC means (drag in overview, Super+Shift+arrow push)
 - **Accurate focus detection** — tracks activation timestamps to resolve COSMIC's multiple-activated-window quirk
 - **Verbose logging** — all window events, focus changes, workspace switches, and command actions in one place
 

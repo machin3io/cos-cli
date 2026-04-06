@@ -298,6 +298,35 @@ impl Dispatch<zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1, ()> for AppSt
 
                 app_data.apps.retain(|a| &a.handle != toplevel);
             }
+            zcosmic_toplevel_handle_v1::Event::ExtWorkspaceEnter { workspace } => {
+                // resolve workspace handle to name
+                let ws_name = app_data.workspace_group.iter()
+                    .flat_map(|g| g.iter())
+                    .find(|ws| ws.handle == workspace)
+                    .map(|ws| ws.name.clone());
+
+                if let Some(name) = ws_name {
+                    if let Some(ref ds) = app_data.daemon_state {
+                        if let Ok(mut ds) = ds.lock() {
+                            ds.on_workspace_enter(&daemon::handle_id(toplevel), &name);
+                        }
+                    }
+                }
+            }
+            zcosmic_toplevel_handle_v1::Event::ExtWorkspaceLeave { workspace } => {
+                let ws_name = app_data.workspace_group.iter()
+                    .flat_map(|g| g.iter())
+                    .find(|ws| ws.handle == workspace)
+                    .map(|ws| ws.name.clone());
+
+                if let Some(name) = ws_name {
+                    if let Some(ref ds) = app_data.daemon_state {
+                        if let Ok(mut ds) = ds.lock() {
+                            ds.on_workspace_leave(&daemon::handle_id(toplevel), &name);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }

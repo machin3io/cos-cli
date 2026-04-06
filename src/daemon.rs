@@ -71,6 +71,7 @@ pub struct WindowInfo {
     pub minimized_at: Option<u64>,
     pub activated_at: Option<u64>,
     pub auto_maximized: bool,
+    pub workspace_confirmed: bool,
 }
 
 impl DaemonState {
@@ -106,6 +107,7 @@ impl DaemonState {
             minimized_at: None,
             activated_at: None,
             auto_maximized: false,
+            workspace_confirmed: false,
         });
 
         self.queue_auto_maximize(ws);
@@ -154,10 +156,10 @@ impl DaemonState {
                     w.minimized_at = None;
                 }
 
-                // NOTE: workspace validation is not done here — COSMIC sends
-                // ####: activation events for windows on other workspaces (multi-
-                // ####: activation quirk), so we can't reliably infer a window's
-                // ####: workspace from activation alone
+                // NOTE: workspace validation via activation is not reliable —
+                // ####: COSMIC sends activation events for windows on other
+                // ####: workspaces (multi-activation quirk). pre-existing windows
+                // ####: get corrected by workspace_enter events on their next move
             } else if !is_activated && was_activated {
                 w.activated_at = None;
             }
@@ -194,6 +196,34 @@ impl DaemonState {
         if name != self.active_workspace {
             daemon_log(&format!("workspace changed: {} -> {}", self.active_workspace, name));
             self.active_workspace = name.to_string();
+        }
+    }
+
+
+    // called from dispatch when a toplevel enters a workspace
+    pub fn on_workspace_enter(&mut self, handle_id: &str, workspace: &str) {
+        if let Some(w) = self.windows.get_mut(handle_id) {
+            let old_ws = w.workspace.clone();
+            w.workspace_confirmed = true;
+
+            if old_ws != workspace {
+                daemon_log(&format!("  workspace enter: {} '{}' moved {} -> {}", w.app_id, w.title, old_ws, workspace));
+                w.workspace = workspace.to_string();
+
+                // trigger auto-maximize on both source and destination workspaces
+                self.queue_auto_maximize(old_ws);
+                self.queue_auto_maximize(workspace.to_string());
+            } else {
+                daemon_log(&format!("  workspace enter: {} '{}' on workspace {}", w.app_id, w.title, workspace));
+            }
+        }
+    }
+
+
+    // called from dispatch when a toplevel leaves a workspace
+    pub fn on_workspace_leave(&mut self, handle_id: &str, workspace: &str) {
+        if let Some(w) = self.windows.get(handle_id) {
+            daemon_log(&format!("  workspace leave: {} '{}' left workspace {}", w.app_id, w.title, workspace));
         }
     }
 
