@@ -5,8 +5,11 @@ use cosmic_protocols::toplevel_management::v1::client::zcosmic_toplevel_manager_
 
 use wayland_client::protocol::wl_seat;
 use wayland_client::{
-    Connection, Dispatch, QueueHandle, event_created_child,
+    Connection, Dispatch, Proxy, QueueHandle, event_created_child,
     protocol::{wl_output, wl_registry},
+};
+use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
+    ext_foreign_toplevel_handle_v1, ext_foreign_toplevel_list_v1,
 };
 use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
@@ -38,7 +41,17 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
                     proxy.bind::<wl_output::WlOutput, _, _>(name, 4, qh, ());
                 }
                 "zcosmic_toplevel_info_v1" => {
-                    proxy.bind::<zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1, _, _>(
+                    state.cosmic_toplevel_info = Some(
+                        proxy.bind::<zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1, _, _>(
+                            name,
+                            3,
+                            qh,
+                            (),
+                        ),
+                    );
+                }
+                "ext_foreign_toplevel_list_v1" => {
+                    proxy.bind::<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, _, _>(
                         name,
                         1,
                         qh,
@@ -196,39 +209,118 @@ impl Dispatch<zcosmic_toplevel_manager_v1::ZcosmicToplevelManagerV1, ()> for App
 
 impl Dispatch<zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1, ()> for AppState {
     fn event(
-        app_data: &mut Self,
+        _app_data: &mut Self,
         _info: &zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1,
-        event: zcosmic_toplevel_info_v1::Event,
+        _event: zcosmic_toplevel_info_v1::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<AppState>,
     ) {
-        if let zcosmic_toplevel_info_v1::Event::Toplevel { toplevel } = event {
-
-            // notify daemon of new window
-            if let Some(ref ds) = app_data.daemon_state {
-                if let Ok(mut ds) = ds.lock() {
-                    ds.on_window_created(&daemon::handle_id(&toplevel));
-                }
-            }
-
-            app_data.apps.push(App {
-                handle: toplevel,
-                title: None,
-                app_id: None,
-                outputs: Vec::new(),
-                state: Vec::new(),
-            })
-        }
+        // v3 binding: toplevel discovery is handled via ext_foreign_toplevel_list_v1,
+        // cosmic handles are created via get_cosmic_toplevel in that handler
     }
 
     event_created_child!(
-        AppState ,
+        AppState,
         zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1,
         [
             zcosmic_toplevel_info_v1::EVT_TOPLEVEL_OPCODE => (zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1, ()),
         ]
     );
+}
+
+
+impl Dispatch<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, ()> for AppState {
+    fn event(
+        _app_data: &mut Self,
+        _list: &ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
+        _event: ext_foreign_toplevel_list_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<AppState>,
+    ) {
+        // toplevel events are handled via ext_foreign_toplevel_handle_v1
+    }
+
+    event_created_child!(
+        AppState,
+        ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
+        [
+            ext_foreign_toplevel_list_v1::EVT_TOPLEVEL_OPCODE => (ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()),
+        ]
+    );
+}
+
+
+impl Dispatch<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()> for AppState {
+    fn event(
+        app_data: &mut Self,
+        foreign_handle: &ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+        event: ext_foreign_toplevel_handle_v1::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<AppState>,
+    ) {
+        let fid = format!("{:?}", foreign_handle.id());
+
+        match event {
+            ext_foreign_toplevel_handle_v1::Event::Title { title } => {
+                app_data.foreign_toplevel_props.entry(fid).or_insert_with(|| (String::new(), String::new())).1 = title;
+            }
+            ext_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
+                app_data.foreign_toplevel_props.entry(fid).or_insert_with(|| (String::new(), String::new())).0 = app_id;
+            }
+            ext_foreign_toplevel_handle_v1::Event::Done => {
+                // only create a cosmic handle on the first Done event per foreign toplevel
+                if app_data.foreign_toplevel_done.contains(&fid) {
+                    return;
+                }
+                app_data.foreign_toplevel_done.insert(fid.clone());
+
+                let (app_id, title) = app_data.foreign_toplevel_props.remove(&fid).unwrap_or_default();
+
+                if let Some(ref info) = app_data.cosmic_toplevel_info {
+                    let cosmic_handle = info.get_cosmic_toplevel(foreign_handle, qh, ());
+                    let hid = daemon::handle_id(&cosmic_handle);
+
+                    // store foreign → cosmic handle mapping for close event forwarding
+                    app_data.foreign_to_cosmic.insert(fid.clone(), hid.clone());
+
+                    // notify daemon of new window with title/app_id
+                    if let Some(ref ds) = app_data.daemon_state {
+                        if let Ok(mut ds) = ds.lock() {
+                            ds.on_window_created(&hid);
+                            ds.on_app_id_changed(&hid, &app_id);
+                            ds.on_title_changed(&hid, &title);
+                        }
+                    }
+
+                    app_data.apps.push(App {
+                        handle: cosmic_handle,
+                        title: Some(title),
+                        app_id: Some(app_id),
+                        outputs: Vec::new(),
+                        state: Vec::new(),
+                    });
+                }
+            }
+            ext_foreign_toplevel_handle_v1::Event::Closed => {
+                app_data.foreign_toplevel_done.remove(&fid);
+                app_data.foreign_toplevel_props.remove(&fid);
+
+                // forward close to daemon and remove the cosmic handle
+                if let Some(cosmic_hid) = app_data.foreign_to_cosmic.remove(&fid) {
+                    if let Some(ref ds) = app_data.daemon_state {
+                        if let Ok(mut ds) = ds.lock() {
+                            ds.on_window_closed(&cosmic_hid);
+                        }
+                    }
+                    app_data.apps.retain(|a| daemon::handle_id(&a.handle) != cosmic_hid);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Dispatch<zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1, ()> for AppState {

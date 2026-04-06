@@ -346,9 +346,13 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut wl_state = AppState {
         cosmic_toplevel_manager: None,
+        cosmic_toplevel_info: None,
         workspace_manager: None,
         workspace_group: Vec::new(),
         apps: Vec::new(),
+        foreign_toplevel_done: std::collections::HashSet::new(),
+        foreign_toplevel_props: std::collections::HashMap::new(),
+        foreign_to_cosmic: std::collections::HashMap::new(),
         outputs: Vec::new(),
         seats: Vec::new(),
         daemon_state: Some(Arc::clone(&state)),

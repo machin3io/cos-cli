@@ -1,5 +1,6 @@
-use cosmic_protocols::toplevel_info::v1::client::zcosmic_toplevel_handle_v1;
+use cosmic_protocols::toplevel_info::v1::client::{zcosmic_toplevel_handle_v1, zcosmic_toplevel_info_v1};
 use cosmic_protocols::toplevel_management::v1::client::zcosmic_toplevel_manager_v1;
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -173,9 +174,13 @@ struct AppState {
     workspace_group: Vec<Vec<Workspace>>,
     workspace_manager: Option<ext_workspace_manager_v1::ExtWorkspaceManagerV1>,
     cosmic_toplevel_manager: Option<zcosmic_toplevel_manager_v1::ZcosmicToplevelManagerV1>,
+    cosmic_toplevel_info: Option<zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1>,
     outputs: Vec<(wl_output::WlOutput, String)>,
     seats: Vec<(wl_seat::WlSeat, String)>,
     apps: Vec<App>,
+    foreign_toplevel_done: HashSet<String>,
+    foreign_toplevel_props: std::collections::HashMap<String, (String, String)>,
+    foreign_to_cosmic: std::collections::HashMap<String, String>,
     daemon_state: Option<std::sync::Arc<std::sync::Mutex<daemon::DaemonState>>>,
 }
 
@@ -553,9 +558,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut state = AppState {
         cosmic_toplevel_manager: None,
+        cosmic_toplevel_info: None,
         workspace_manager: None,
         workspace_group: Vec::new(),
         apps: Vec::new(),
+        foreign_toplevel_done: HashSet::new(),
+        foreign_toplevel_props: std::collections::HashMap::new(),
+        foreign_to_cosmic: std::collections::HashMap::new(),
         outputs: Vec::new(),
         seats: Vec::new(),
         daemon_state: None,
