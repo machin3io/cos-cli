@@ -78,6 +78,8 @@ Options for 'gap':
 Config files (~/.config/cosmic/cos-cli/):
   gaps                          Per-workspace gap settings (workspace:inner,outer)
   auto_maximize                 Auto-maximize sole window on zero-gap workspaces (true/false)
+  zero_gap_radii                Remove corner radii on zero-gap workspaces (true/false)
+  corner_radius                 Default corner radius to restore when gaps > 0 (default: 8)
 
 Options for 'info':
   --json                        Output in JSON format
@@ -906,10 +908,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             manager.commit();
             conn.flush()?;
 
-            // apply per-workspace gaps
+            // apply per-workspace gaps and corner radii
             let (_, outer) = get_gaps_for_workspace(&target_name);
             apply_gaps(&target_name);
             let _ = daemon::send_command(&format!("log gap applied: workspace {} ({})", target_name, outer));
+
+            if let Some(r) = apply_corner_radii(&target_name) {
+                let _ = daemon::send_command(&format!("log corner radii applied: workspace {} ({})", target_name, r));
+            }
 
             // auto-maximize via daemon (daemon has correct handle IDs)
             let _ = daemon::send_command(&format!("auto-maximize {}", target_name));
@@ -928,10 +934,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| "1".to_string());
 
             let (_, old_outer) = get_gaps_for_workspace(&current_ws);
-            adjust_gaps(&current_ws, delta);
+            let radii = adjust_gaps(&current_ws, delta);
             let (_, new_outer) = get_gaps_for_workspace(&current_ws);
 
             let _ = daemon::send_command(&format!("log gap changed: workspace {} ({} -> {})", current_ws, old_outer, new_outer));
+
+            if let Some(r) = radii {
+                let _ = daemon::send_command(&format!("log corner radii applied: workspace {} ({})", current_ws, r));
+            }
 
             // auto-maximize when gap hits zero
             if new_outer == 0 && old_outer != 0 {
@@ -996,23 +1006,29 @@ const GAPS_CONFIG: &str = ".config/cosmic/cos-cli/gaps";
 const COSMIC_GAPS: &str = ".config/cosmic/com.system76.CosmicTheme.Dark/v1/gaps";
 const DEFAULT_GAP: (u32, u32) = (0, 30);
 const AUTO_MAXIMIZE_CONFIG: &str = ".config/cosmic/cos-cli/auto_maximize";
+const ZERO_GAP_RADII_CONFIG: &str = ".config/cosmic/cos-cli/zero_gap_radii";
+const CORNER_RADIUS_CONFIG: &str = ".config/cosmic/cos-cli/corner_radius";
+const DEFAULT_CORNER_RADIUS: f64 = 8.0;
+
+
+fn home_path(relative: &str) -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/x".to_string());
+    Path::new(&home).join(relative)
+}
 
 
 fn gaps_config_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/x".to_string());
-    Path::new(&home).join(GAPS_CONFIG)
+    home_path(GAPS_CONFIG)
 }
 
 
 fn cosmic_gaps_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/x".to_string());
-    Path::new(&home).join(COSMIC_GAPS)
+    home_path(COSMIC_GAPS)
 }
 
 
 pub fn is_auto_maximize_enabled() -> bool {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/x".to_string());
-    let path = Path::new(&home).join(AUTO_MAXIMIZE_CONFIG);
+    let path = home_path(AUTO_MAXIMIZE_CONFIG);
 
     // create with default true if missing
     if !path.exists() {
@@ -1027,6 +1043,77 @@ pub fn is_auto_maximize_enabled() -> bool {
         Ok(content) => content.trim() != "false",
         Err(_) => true,
     }
+}
+
+
+fn is_zero_gap_radii_enabled() -> bool {
+    let path = home_path(ZERO_GAP_RADII_CONFIG);
+
+    // create with default true if missing
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&path, "true\n");
+        return true;
+    }
+
+    match fs::read_to_string(&path) {
+        Ok(content) => content.trim() != "false",
+        Err(_) => true,
+    }
+}
+
+
+fn get_corner_radius() -> f64 {
+    let path = home_path(CORNER_RADIUS_CONFIG);
+
+    // create with default if missing
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&path, format!("{}\n", DEFAULT_CORNER_RADIUS as u32));
+        return DEFAULT_CORNER_RADIUS;
+    }
+
+    match fs::read_to_string(&path) {
+        Ok(content) => content.trim().parse::<f64>().unwrap_or(DEFAULT_CORNER_RADIUS),
+        Err(_) => DEFAULT_CORNER_RADIUS,
+    }
+}
+
+
+fn apply_corner_radii(workspace: &str) -> Option<f64> {
+    if !is_zero_gap_radii_enabled() {
+        return None;
+    }
+
+    let (_, outer) = get_gaps_for_workspace(workspace);
+    let r = if outer == 0 { 0.0 } else { get_corner_radius() };
+    let xs = if r == 0.0 { 0.0 } else { (r / 4.0).max(1.0) };
+
+    let content = format!(
+        "(\n    radius_0: (0.0, 0.0, 0.0, 0.0),\n    radius_xs: ({xs}, {xs}, {xs}, {xs}),\n    radius_s: ({r}, {r}, {r}, {r}),\n    radius_m: ({r}, {r}, {r}, {r}),\n    radius_l: ({r}, {r}, {r}, {r}),\n    radius_xl: ({r}, {r}, {r}, {r}),\n)\n",
+        xs = format!("{:.1}", xs),
+        r = format!("{:.1}", r),
+    );
+
+    // write to the active theme (Dark or Light based on Mode config)
+    let is_dark = fs::read_to_string(home_path(".config/cosmic/com.system76.CosmicTheme.Mode/v1/is_dark"))
+        .map(|s| s.trim() != "false")
+        .unwrap_or(true);
+    let theme = if is_dark { "Dark" } else { "Light" };
+
+    let path = home_path(&format!(".config/cosmic/com.system76.CosmicTheme.{}/v1/corner_radii", theme));
+
+    // skip write if the file already has the same content
+    if fs::read_to_string(&path).map(|s| s == content).unwrap_or(false) {
+        return None;
+    }
+
+    let _ = fs::write(&path, &content);
+    Some(r)
 }
 
 
@@ -1096,7 +1183,7 @@ fn apply_gaps(workspace: &str) {
 }
 
 
-fn adjust_gaps(workspace: &str, delta: i32) {
+fn adjust_gaps(workspace: &str, delta: i32) -> Option<f64> {
     let (inner, outer) = get_gaps_for_workspace(workspace);
 
     let new_outer = (outer as i32 + delta).max(0) as u32;
@@ -1132,4 +1219,7 @@ fn adjust_gaps(workspace: &str, delta: i32) {
     // apply immediately
     let content = format!("({}, {})\n", inner, new_outer);
     let _ = fs::write(cosmic_gaps_path(), content);
+
+    // update corner radii based on new gap value
+    apply_corner_radii(workspace)
 }

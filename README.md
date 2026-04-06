@@ -20,7 +20,7 @@ A CLI tool for managing windows and workspaces on the COSMIC Desktop Environment
 - **Workspace Toggle**: Switch back and forth between the last two workspaces via statefile history.
 - **Move Focused Window**: Move the currently focused app to any workspace.
 - **Minimize/Unminimize**: Minimize the focused app with per-workspace history, unminimize the last minimized app on the current workspace.
-- **Per-Workspace Gaps**: Automatically apply window gap settings per workspace, with keybinds to adjust on the fly.
+- **Per-Workspace Gaps**: Automatically apply window gap settings per workspace, with keybinds to adjust on the fly. Corner radii are automatically removed on zero-gap workspaces.
 - **Daemon Mode**: Persistent background process that tracks windows across workspaces via Wayland handle IDs, enabling accurate focus detection, skip-empty cycling, and per-workspace queries.
 
 ## Daemon (recommended)
@@ -189,7 +189,7 @@ default:0,30
 5:0,30
 ````
 
-When switching workspaces (via any `cos-cli workspace` command), the gap for the target workspace is automatically applied by writing to `~/.config/cosmic/com.system76.CosmicTheme.Dark/v1/gaps`, which COSMIC hot-reloads.
+When switching workspaces (via any `cos-cli workspace` command), the gap for the target workspace is automatically applied by writing to `~/.config/cosmic/com.system76.CosmicTheme.Dark/v1/gaps`, which COSMIC hot-reloads. Corner radii are also adjusted: zero on zero-gap workspaces, restored to the configured value otherwise (see `zero_gap_radii` and `corner_radius` config).
 
 On zero-gap workspaces with a single visible window, the window is automatically maximized to remove the remaining border and rounded corners. When a second window appears (new window, unminimize, move-to), only auto-maximized windows are unmaximized — manually maximized windows are left untouched. This behavior can be disabled via the `auto_maximize` config file.
 
@@ -204,6 +204,8 @@ All config files live in `~/.config/cosmic/cos-cli/`:
 
 *   **`gaps`** — per-workspace gap settings (inner,outer). Created automatically with defaults on first use.
 *   **`auto_maximize`** — `true` (default) or `false`. Controls whether a sole visible window on a zero-gap workspace is automatically maximized.
+*   **`zero_gap_radii`** — `true` (default) or `false`. When enabled, window corner radii are set to zero on workspaces with zero outer gaps, and restored to the configured radius when gaps are non-zero. Only writes the theme file when the value actually changes.
+*   **`corner_radius`** — the corner radius value (default: `8`) to restore when gaps are non-zero. Adjustable by editing the file.
 
 #### `move`
 Move an application to a specific workspace.
