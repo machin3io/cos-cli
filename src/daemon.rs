@@ -117,7 +117,10 @@ impl DaemonState {
     // called from dispatch when a toplevel's title changes
     pub fn on_title_changed(&mut self, handle_id: &str, title: &str) {
         if let Some(w) = self.windows.get_mut(handle_id) {
-            w.title = title.to_string();
+            if w.title != title {
+                daemon_log(&format!("  title: {} '{}' -> '{}'", w.app_id, w.title, title));
+                w.title = title.to_string();
+            }
         }
     }
 
@@ -217,6 +220,7 @@ impl DaemonState {
                 daemon_log(&format!("  workspace enter: {} '{}' on workspace {}", w.app_id, w.title, workspace));
             }
         }
+
     }
 
 
@@ -449,12 +453,16 @@ fn process_auto_maximize(
                     }
                 }
 
-                // activate the sole window so focused_window() can find it immediately
-                if let Some(seat) = wl_state.seats.first() {
-                    daemon_log(&format!("  auto-activate: {} '{}' on workspace {}", app_id, title, workspace));
-                    manager.activate(&app.handle, &seat.0);
-                    conn.flush().ok();
-                }
+                // NOTE: auto-activate disabled — the compositor appears to send
+                // ####: activated state natively on workspace switch. this was
+                // ####: originally added pre-v3 when focus events were unreliable.
+                // ####: remove entirely if no issues arise without it
+                //
+                // if let Some(seat) = wl_state.seats.first() {
+                //     daemon_log(&format!("  auto-activate: {} '{}' on workspace {}", app_id, title, workspace));
+                //     manager.activate(&app.handle, &seat.0);
+                //     conn.flush().ok();
+                // }
             }
         }
 

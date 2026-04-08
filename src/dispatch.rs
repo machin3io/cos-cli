@@ -265,10 +265,36 @@ impl Dispatch<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()> fo
 
         match event {
             ext_foreign_toplevel_handle_v1::Event::Title { title } => {
-                app_data.foreign_toplevel_props.entry(fid).or_insert_with(|| (String::new(), String::new())).1 = title;
+                // if this foreign handle already has a cosmic handle, forward the title update
+                if let Some(cosmic_hid) = app_data.foreign_to_cosmic.get(&fid) {
+                    if let Some(app) = app_data.apps.iter_mut().find(|a| daemon::handle_id(&a.handle) == *cosmic_hid) {
+                        app.title = Some(title.clone());
+                    }
+
+                    if let Some(ref ds) = app_data.daemon_state {
+                        if let Ok(mut ds) = ds.lock() {
+                            ds.on_title_changed(cosmic_hid, &title);
+                        }
+                    }
+                } else {
+                    app_data.foreign_toplevel_props.entry(fid).or_insert_with(|| (String::new(), String::new())).1 = title;
+                }
             }
             ext_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
-                app_data.foreign_toplevel_props.entry(fid).or_insert_with(|| (String::new(), String::new())).0 = app_id;
+                // if this foreign handle already has a cosmic handle, forward the app_id update
+                if let Some(cosmic_hid) = app_data.foreign_to_cosmic.get(&fid) {
+                    if let Some(app) = app_data.apps.iter_mut().find(|a| daemon::handle_id(&a.handle) == *cosmic_hid) {
+                        app.app_id = Some(app_id.clone());
+                    }
+
+                    if let Some(ref ds) = app_data.daemon_state {
+                        if let Ok(mut ds) = ds.lock() {
+                            ds.on_app_id_changed(cosmic_hid, &app_id);
+                        }
+                    }
+                } else {
+                    app_data.foreign_toplevel_props.entry(fid).or_insert_with(|| (String::new(), String::new())).0 = app_id;
+                }
             }
             ext_foreign_toplevel_handle_v1::Event::Done => {
                 // only create a cosmic handle on the first Done event per foreign toplevel
