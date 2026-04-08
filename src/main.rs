@@ -82,6 +82,13 @@ Config files (~/.config/cosmic/cos-cli/):
   zero_gap_radii                Remove corner radii on zero-gap workspaces (true/false)
   corner_radius                 Default corner radius to restore when gaps > 0 (default: 8)
 
+Options for 'daemon':
+  --verbose                     Log window events and focus changes to stdout
+  --log                         Write debug output to $XDG_RUNTIME_DIR/cos-cli.log
+  --restart                     Kill the existing daemon before starting a new one
+  --install                     Install and enable the systemd user service
+  --uninstall                   Disable and remove the systemd user service
+
 Options for 'info':
   --json                        Output in JSON format
 
@@ -116,6 +123,8 @@ Examples:
   cos-cli daemon --log
   cos-cli daemon --verbose --log
   cos-cli daemon --restart
+  cos-cli daemon --install
+  cos-cli daemon --uninstall
   cos-cli query
   cos-cli query ping
   cos-cli query active-workspace
@@ -163,6 +172,84 @@ impl From<&str> for CliError {
         CliError(s.to_string())
     }
 }
+
+const SERVICE_UNIT: &str = "[Unit]
+Description=cos-cli Wayland toplevel daemon
+After=graphical-session.target
+
+[Service]
+ExecStart=EXE_PATH daemon
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+";
+
+
+fn service_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").expect("HOME not set");
+    Path::new(&home).join(".config/systemd/user/cos-cli.service")
+}
+
+
+fn install_service() -> Result<(), Box<dyn Error>> {
+    let exe = std::env::current_exe()?;
+    let unit = SERVICE_UNIT.replace("EXE_PATH", &exe.display().to_string());
+    let path = service_path();
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(&path, unit)?;
+    println!("wrote {}", path.display());
+
+    let reload = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status()?;
+
+    if !reload.success() {
+        return Err(CliError::new("systemctl --user daemon-reload failed".into()));
+    }
+
+    let enable = std::process::Command::new("systemctl")
+        .args(["--user", "enable", "--now", "cos-cli"])
+        .status()?;
+
+    if !enable.success() {
+        return Err(CliError::new("systemctl --user enable --now cos-cli failed".into()));
+    }
+
+    println!("service enabled and started");
+    Ok(())
+}
+
+
+fn uninstall_service() -> Result<(), Box<dyn Error>> {
+    let disable = std::process::Command::new("systemctl")
+        .args(["--user", "disable", "--now", "cos-cli"])
+        .status()?;
+
+    if !disable.success() {
+        return Err(CliError::new("systemctl --user disable --now cos-cli failed".into()));
+    }
+
+    let path = service_path();
+
+    if path.exists() {
+        fs::remove_file(&path)?;
+        println!("removed {}", path.display());
+    }
+
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status();
+
+    println!("service disabled and removed");
+    Ok(())
+}
+
 
 struct Workspace {
     name: String,
@@ -507,6 +594,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("minimize") => Command::Minimize,
         Some("unminimize") => Command::Unminimize,
         Some("daemon") => {
+            if pargs.contains("--install") {
+                return install_service();
+            }
+            if pargs.contains("--uninstall") {
+                return uninstall_service();
+            }
             if pargs.contains("--verbose") {
                 daemon::VERBOSE.store(true, std::sync::atomic::Ordering::Relaxed);
             }

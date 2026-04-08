@@ -36,9 +36,35 @@ The daemon (`cos-cli daemon`) is a persistent background process that maintains 
 
 **Without the daemon**, basic commands still work (workspace switching, gap adjustment, toggle) but `move-to` falls back to less reliable matching, `minimize` and `unminimize` are unavailable, and features like skip-empty cycling and auto-maximize are disabled.
 
-Start the daemon on login or as a systemd user service:
+Before setting up autostart, run the daemon manually in a terminal to confirm everything works:
 ````console
-cos-cli daemon
+cos-cli daemon --verbose
+````
+
+You should see window events and workspace tracking output as you interact with your desktop. Once confirmed, set it up as a systemd user service for automatic startup (see below), or just run `cos-cli daemon` in your login shell.
+
+
+### Systemd user service (autostart)
+
+The easiest way to set up autostart is with the built-in install command:
+
+````console
+cos-cli daemon --install
+````
+
+This writes the service file to `~/.config/systemd/user/cos-cli.service`, reloads systemd, and enables the service immediately. The `ExecStart` path is auto-detected from the current binary location.
+
+To remove the service:
+
+````console
+cos-cli daemon --uninstall
+````
+
+To check the service status or view logs:
+
+````console
+systemctl --user status cos-cli
+journalctl --user -u cos-cli -f
 ````
 
 ## Installation
@@ -47,6 +73,8 @@ Ensure you have the Rust toolchain installed.
 ````console
 cargo install --git https://github.com/machin3io/cos-cli
 ````
+
+After installing, see the [Daemon section](#daemon-recommended) for how to run it as a systemd user service.
 
 For the upstream version (without workspace switching, minimize history, etc.):
 
@@ -280,6 +308,8 @@ Start the background daemon for persistent window/workspace tracking.
 cos-cli daemon
 cos-cli daemon --verbose
 cos-cli daemon --restart
+cos-cli daemon --install
+cos-cli daemon --uninstall
 ````
 Arguments:
 *   `--verbose`
@@ -288,6 +318,10 @@ Arguments:
     Write all debug output to `$XDG_RUNTIME_DIR/cos-cli.log` (can be combined with `--verbose`)
 *   `--restart`
     Kill the existing daemon before starting a new one
+*   `--install`
+    Install and enable a systemd user service for automatic startup. Writes the service file to `~/.config/systemd/user/cos-cli.service`, reloads systemd, and enables the service immediately. The `ExecStart` path is auto-detected from the current binary location.
+*   `--uninstall`
+    Disable the systemd user service, remove the service file, and reload systemd.
 
 The daemon maintains a persistent Wayland connection and tracks all windows using unique Wayland handle IDs — which workspace they're on, their state (minimized, activated, etc.), title, and focus history. It listens on `$XDG_RUNTIME_DIR/cos-cli.sock` for IPC queries from other cos-cli commands.
 
