@@ -428,8 +428,17 @@ fn process_auto_maximize(
         return;
     }
 
+    let exclusions = crate::auto_maximize_exclusions();
+
+    // log excluded windows on this workspace
+    for (_, w) in ds.windows.iter() {
+        if w.workspace == workspace && !w.state.contains(&"minimized".to_string()) && crate::is_excluded(&w.app_id, &w.title, &exclusions) {
+            daemon_log(&format!("  excluded from window count: {} '{}' on workspace {}", w.app_id, w.title, workspace));
+        }
+    }
+
     let visible: Vec<(&String, &WindowInfo)> = ds.windows.iter()
-        .filter(|(_, w)| w.workspace == workspace && !w.state.contains(&"minimized".to_string()))
+        .filter(|(_, w)| w.workspace == workspace && !w.state.contains(&"minimized".to_string()) && !crate::is_excluded(&w.app_id, &w.title, &exclusions))
         .collect();
 
     if visible.len() == 1 {

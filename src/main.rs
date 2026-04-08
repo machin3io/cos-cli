@@ -1015,6 +1015,7 @@ const GAPS_CONFIG: &str = ".config/cosmic/cos-cli/gaps";
 const COSMIC_GAPS: &str = ".config/cosmic/com.system76.CosmicTheme.Dark/v1/gaps";
 const DEFAULT_GAP: (u32, u32) = (0, 30);
 const AUTO_MAXIMIZE_CONFIG: &str = ".config/cosmic/cos-cli/auto_maximize";
+const AUTO_MAXIMIZE_EXCLUDE_CONFIG: &str = ".config/cosmic/cos-cli/auto_maximize_exclude";
 const ZERO_GAP_RADII_CONFIG: &str = ".config/cosmic/cos-cli/zero_gap_radii";
 const CORNER_RADIUS_CONFIG: &str = ".config/cosmic/cos-cli/corner_radius";
 const DEFAULT_CORNER_RADIUS: f64 = 8.0;
@@ -1052,6 +1053,46 @@ pub fn is_auto_maximize_enabled() -> bool {
         Ok(content) => content.trim() != "false",
         Err(_) => true,
     }
+}
+
+
+/// read exclusion patterns from config file.
+/// format: "app_id" or "app_id:title_substring" per line.
+pub fn auto_maximize_exclusions() -> Vec<(String, Option<String>)> {
+    let path = home_path(AUTO_MAXIMIZE_EXCLUDE_CONFIG);
+
+    // create with default exclusions if missing
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&path, "Tk:pass-autotype\ngcr-prompter\n");
+    }
+
+    match fs::read_to_string(&path) {
+        Ok(content) => content.lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                if let Some((app_id, title)) = l.split_once(':') {
+                    (app_id.to_string(), Some(title.to_string()))
+                } else {
+                    (l, None)
+                }
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+
+pub fn is_excluded(app_id: &str, title: &str, exclusions: &[(String, Option<String>)]) -> bool {
+    exclusions.iter().any(|(ex_app_id, ex_title)| {
+        ex_app_id == app_id && match ex_title {
+            Some(t) => title.contains(t.as_str()),
+            None => true,
+        }
+    })
 }
 
 
