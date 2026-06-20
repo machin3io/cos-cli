@@ -19,10 +19,11 @@ There are no tests in this project.
 
 ## Architecture
 
-The entire codebase is two files:
+The codebase is three files:
 
-- **`src/main.rs`** — CLI argument parsing (`pico-args`), `AppState` struct, command execution logic (`info`, `move`, `activate`, `state`), custom error type, hand-rolled JSON output (no serde).
+- **`src/main.rs`** — CLI argument parsing (`pico-args`), `AppState` struct, command execution logic (`info`, `move`, `activate`, `state`), custom error type, hand-rolled JSON output (no serde), and config-file readers (gaps, auto-maximize exclusions, etc.).
 - **`src/dispatch.rs`** — Wayland `Dispatch` trait implementations for all protocol interfaces (registry, output, seat, workspace, toplevel). This is the event-handling layer that populates `AppState`.
+- **`src/daemon.rs`** — the long-running daemon: window-identity tracking via Wayland handle IDs, IPC over a unix socket, and the pending-action queue that drives auto-maximize / move / minimize behavior (`process_auto_maximize` etc.).
 
 ### Flow
 
@@ -52,3 +53,11 @@ The entire codebase is two files:
 - **`state`** — change window state: maximize, minimize, fullscreen, sticky (by `--app-id` or `--index`)
 
 Both `move` and `state` support `--wait <SECONDS>` to poll for an app to appear before acting.
+
+## Runtime config & deployment
+
+Runtime config lives in `~/.config/cosmic/cos-cli/` (`gaps`, `corner_radius`, `zero_gap_radii`, `auto_maximize_exclude`, …). The daemon self-generates each file with defaults if missing.
+
+These files are **not** edited live on the target machine. They are version-controlled in the **tools** repo at `~/Archive/python/tools/install/data/home/.config/cosmic/cos-cli/`, which doubles as the sync "golden dir" (`GOLDEN_DIR`). COSMIC/cos-cli only runs on **atlas**; dev usually happens on **eremite** (an X machine), where `~/.config/cosmic` exists only in that golden snapshot. To change runtime behavior, edit/create the file in the tools repo's `install/data` tree and commit there (`install - …`) — a sync push eremite→atlas writes it into atlas's live `~/.config/cosmic/cos-cli/`. Seed any new file with the daemon's self-generated defaults so the push doesn't clobber them.
+
+- **`auto_maximize_exclude`** — one `app_id` (or `app_id:title_substring`) per line; matches `app_id` exactly. The daemon auto-maximizes the sole visible window on a 0-gap workspace, and excluded windows are dropped from the visible count *before* that check (so a lone excluded window stays as-is). Floating windows all share `app_id` `Floating` (`kitty --class Floating …`), so one `Floating` line covers them.
