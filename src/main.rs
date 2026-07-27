@@ -1116,7 +1116,7 @@ const DEFAULT_CORNER_RADIUS: f64 = 8.0;
 
 
 fn home_path(relative: &str) -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/x".to_string());
+    let home = std::env::var("HOME").expect("HOME not set");
     Path::new(&home).join(relative)
 }
 
@@ -1155,12 +1155,12 @@ pub fn is_auto_maximize_enabled() -> bool {
 pub fn auto_maximize_exclusions() -> Vec<(String, Option<String>)> {
     let path = home_path(AUTO_MAXIMIZE_EXCLUDE_CONFIG);
 
-    // create with default exclusions if missing
+    // create empty exclusion list if missing (user-local customization)
     if !path.exists() {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let _ = fs::write(&path, "Tk:pass-autotype\ngcr-prompter\n");
+        let _ = fs::write(&path, "");
     }
 
     match fs::read_to_string(&path) {
