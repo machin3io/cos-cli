@@ -3,19 +3,12 @@
 
 ## activate-previous — focus the previously-active window
 
-wanted by the `fuzzylink` tool (`~/Archive/python/tools/fuzzylink/`): its `ctrl+e` keymap should focus the window that was active *before* the current one (the email/editor you switched away from to reach the floating terminal), then type a link into it. on X11/AwesomeWM this is `awful.client.focus.history.previous()`; the COSMIC/Wayland equivalent needs daemon support here. fuzzylink's Wayland branch is currently stubbed and just prints a reminder.
+DONE. used by `fuzzylink` (`ctrl+e`): `cos-cli query do-activate-previous` → sleep → `wtype`.
 
-the daemon already has the pieces:
-- it tracks `activated_at: Option<u64>` per window (`WindowInfo`), set on the `activated` state transition.
-- `focused_window()` returns the window with the **max** `activated_at` on the active workspace.
-- it can activate a handle via the toplevel manager — the pattern is the commented-out auto-activate block in `daemon.rs`: `manager.activate(&app.handle, &seat.0)` (seats live in `wl_state`; `process_unminimize_last` shows how to resolve the handle and flush).
-
-plan:
-1. `DaemonState::previous_window()` — like `focused_window()` but returns the **2nd**-highest `activated_at` (most recently activated window that isn't the current focused one). constrain to the active workspace to start (the common case: floating terminal over the email on the same workspace).
-2. `PendingAction::ActivatePrevious` + a `do-activate-previous` socket command (mirror `do-unminimize` / `process_unminimize_last`): resolve the handle, `manager.activate(&handle, &seat.0)`, `conn.flush()`. return the activated `app_id|title` (or `none`) so fuzzylink can notify.
-3. fuzzylink side: replace the stubbed Wayland branch with `cos-cli query do-activate-previous` → short sleep (activation is async, like the pass tool's PRE_SLEEP) → `wtype` the url.
-
-caveat: confirm `wl_state.seats` is actually populated in the daemon (the commented auto-activate assumed `wl_state.seats.first()`).
+- `activated_at` is now **kept across deactivation** (focus history); `focused_window()` still requires the live `activated` state flag
+- `DaemonState::previous_window()` — 2nd-highest `activated_at` on the active workspace (skips minimized)
+- `PendingAction::ActivatePrevious` + `do-activate-previous` IPC (returns `app_id|title` or `none`, queues the activate on the wayland loop via `manager.activate` + first seat)
+- seats are populated in the daemon event loop (confirmed working)
 
 
 ## exclude transient windows from auto-maximize/unmaximize window count

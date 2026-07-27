@@ -129,6 +129,7 @@ Examples:
   cos-cli query ping
   cos-cli query active-workspace
   cos-cli query focused
+  cos-cli query do-activate-previous
   cos-cli query visible-on 3
   cos-cli query shutdown
   cos-cli state -i 0 --maximize

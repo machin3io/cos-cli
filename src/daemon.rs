@@ -52,6 +52,7 @@ pub enum PendingAction {
     MoveFocusedTo(String),    // target workspace name
     MinimizeFocused,
     UnminimizeLast,           // unminimize last minimized on active workspace
+    ActivatePrevious,         // focus the 2nd-most-recently-activated window
 }
 
 
@@ -147,7 +148,10 @@ impl DaemonState {
 
             w.state = new_states;
 
-            // track activation timestamp
+            // track last-activation timestamp for focus history.
+            // NOTE: deliberately NOT cleared on deactivation — previous_window() ranks
+            // ####: by this timestamp, so it must survive the window losing focus.
+            // ####: focused_window() still requires the live "activated" state flag.
             if is_activated && !was_activated {
                 w.activated_at = Some(now_millis());
                 daemon_log(&format!("  focus: {} '{}' on workspace {}", w.app_id, w.title, w.workspace));
@@ -163,8 +167,6 @@ impl DaemonState {
                 // ####: COSMIC sends activation events for windows on other
                 // ####: workspaces (multi-activation quirk). pre-existing windows
                 // ####: get corrected by workspace_enter events on their next move
-            } else if !is_activated && was_activated {
-                w.activated_at = None;
             }
 
             // track minimize timestamp
@@ -254,6 +256,26 @@ impl DaemonState {
                     && w.activated_at.is_some()
             })
             .max_by_key(|(_, w)| w.activated_at.unwrap())
+    }
+
+
+    pub fn previous_window(&self) -> Option<(&String, &WindowInfo)> {
+        // 2nd-most-recently-activated non-minimized window on the active workspace —
+        // the one you were in before focusing the current one (floating terminal, etc.).
+        // activated_at is kept across deactivation (see on_state_changed) so this ranks
+        // real focus history, not only currently-activated windows.
+        let mut ranked: Vec<(&String, &WindowInfo)> = self.windows.iter()
+            .filter(|(_, w)| {
+                w.workspace == self.active_workspace
+                    && w.activated_at.is_some()
+                    && !w.state.contains(&"minimized".to_string())
+            })
+            .collect();
+
+        ranked.sort_by_key(|(_, w)| std::cmp::Reverse(w.activated_at.unwrap()));
+
+        // [0] is the current/most recent focus; [1] is the previous one
+        ranked.get(1).copied()
     }
 
 
@@ -397,6 +419,9 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 PendingAction::UnminimizeLast => {
                     process_unminimize_last(&state, &wl_state, &conn);
+                }
+                PendingAction::ActivatePrevious => {
+                    process_activate_previous(&state, &wl_state, &conn);
                 }
                 PendingAction::AutoMaximize(workspace) => {
                     process_auto_maximize(&state, &wl_state, &conn, &workspace);
@@ -660,6 +685,40 @@ fn process_unminimize_last(
 }
 
 
+fn process_activate_previous(
+    daemon_state: &Arc<Mutex<DaemonState>>,
+    wl_state: &crate::AppState,
+    conn: &Connection,
+) {
+    let ds = daemon_state.lock().unwrap();
+
+    let prev = ds.previous_window()
+        .map(|(id, w)| (id.clone(), w.app_id.clone(), w.title.clone(), w.workspace.clone()));
+    drop(ds);
+
+    let Some((hid, app_id, title, workspace)) = prev else {
+        daemon_log("  activate-previous: no previous window on active workspace");
+        return;
+    };
+
+    let Some(manager) = &wl_state.cosmic_toplevel_manager else { return; };
+
+    let Some(app) = wl_state.apps.iter().find(|a| handle_id(&a.handle) == hid) else {
+        daemon_log(&format!("  activate-previous: handle not found for {} '{}'", app_id, title));
+        return;
+    };
+
+    let Some(seat) = wl_state.seats.first() else {
+        daemon_log("  activate-previous: no seats found");
+        return;
+    };
+
+    daemon_log(&format!("  activate-previous: {} '{}' on workspace {}", app_id, title, workspace));
+    manager.activate(&app.handle, &seat.0);
+    conn.flush().ok();
+}
+
+
 fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
     let mut reader = BufReader::new(&stream);
     let mut writer = &stream;
@@ -758,6 +817,22 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             let mut ds = state.lock().unwrap();
             ds.pending_actions.push(PendingAction::UnminimizeLast);
             "ok".to_string()
+        }
+
+        "do-activate-previous" => {
+            // return the target identity immediately so the caller can act on it,
+            // and queue the actual activate for the wayland event loop (async, needs seat)
+            let prev = ds.previous_window().map(|(_, w)| format!("{}|{}", w.app_id, w.title));
+
+            match prev {
+                Some(info) => {
+                    drop(ds);
+                    let mut ds = state.lock().unwrap();
+                    ds.pending_actions.push(PendingAction::ActivatePrevious);
+                    info
+                }
+                None => "none".to_string(),
+            }
         }
 
         cmd if cmd.starts_with("auto-maximize ") => {
